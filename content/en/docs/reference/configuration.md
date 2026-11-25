@@ -21,6 +21,18 @@ which of the two you meant. In a yes/no option, `yes`, `no`, `on` and
 show` prints them as `true` and `false`; in a text option a hand-written
 `off` or `yes` is read as that word.
 
+One list of words reads as on, in every yes/no option and every yes/no
+environment variable, whichever engine reads it: `1`, `true`, `yes`, `y` and
+`on`, in any case. Everything else - `0`, `false`, `no`, `off`, an
+empty value, a number such as `2`, a word it does not know - reads as off.
+A stored `null` is no value: `config show` reports the option's built-in,
+while the failure-report opt-out reads it as off. A variable that is on
+until you set it (`BLOWHORN_KEYCHAIN`, `BLOWHORN_ACCOUNT_PREFERENCES`) is
+turned off by any value that is not one of those words; leave it unset or
+empty to keep it on. A few places refuse a word they cannot read rather than
+read it as off (a humanisation dial, a schedule param, the YouTube upload
+flag), and they accept the same on words.
+
 A merge key (`<<: *base`) brings its keys in as YAML defines it, the
 mapping's own keys winning. A number with a leading zero is read in base
 eight (`retention_days: 010` is 8 days) and `0o7` is a word, not a
@@ -64,14 +76,14 @@ environment variables.
 | `defaults.approval.mode` | `BLOWHORN_APPROVAL_MODE` | `off` | `off`, `agent` or `all`: who must approve before work publishes (see below) |
 | `defaults.caps` | none | none | Your own daily caps per platform and action, under the built-in ceilings (see below) |
 | `defaults.quiet_hours` | `BLOWHORN_QUIET_HOURS` | none | Hours when the scheduler claims nothing, written `HH:MM-HH:MM` like `22:00-07:00` (the window may wrap midnight). A due activity inside it is held, not failed, and runs when the window ends. A profile's own Quiet Hours setting wins for its activities |
-| `defaults.quiet_hours_tz` | `BLOWHORN_QUIET_HOURS_TZ` | this computer's zone | The IANA time zone `defaults.quiet_hours` is read in, like `America/New_York`, spelled exactly as the time-zone database spells it: `america/new_york` is refused on every computer. A profile's own Quiet Hours Time Zone setting wins for its activities |
+| `defaults.quiet_hours_tz` | `BLOWHORN_QUIET_HOURS_TZ` | this computer's zone | The IANA time zone `defaults.quiet_hours` is read in, like `America/New_York`, spelled exactly as the time-zone database spells it: `america/new_york` is refused on every computer. A profile's own Quiet Hours Time Zone setting wins for its activities. Unset, the window is read in this computer's zone: `TZ` (surrounding whitespace and a leading `:` removed), then the zone `/etc/localtime` links to. A candidate is kept when the database lists that exact name, or exactly one name that matches it in any case, and the label is the database's spelling (`TZ=america/new_york` is `America/New_York`). When neither names a zone, the label is the current offset, `local time (ABBR)` |
 | `defaults.typing_delay_min_ms`, `defaults.typing_delay_max_ms`, `defaults.typing_jitter_ms`, `defaults.typing_target_duration_s` | `BLOWHORN_TYPING_DELAY_MIN_MS`, `BLOWHORN_TYPING_DELAY_MAX_MS`, `BLOWHORN_TYPING_JITTER_MS`, `BLOWHORN_TYPING_TARGET_DURATION_S` | 35, 165, 9, 20 | How fast keys are typed: the pause band between keys in milliseconds, the random wobble on each pause, and how long a whole entry aims to take in seconds. Shapes both drivers (see below) |
 | `defaults.typing_micro_pause_chance_pct`, `defaults.typing_micro_pause_min_ms`, `defaults.typing_micro_pause_max_ms`, `defaults.typing_long_pause_min_chars`, `defaults.typing_long_pause_max_chars`, `defaults.typing_long_pause_min_ms`, `defaults.typing_long_pause_max_ms` | `BLOWHORN_TYPING_MICRO_PAUSE_CHANCE_PCT`, `BLOWHORN_TYPING_MICRO_PAUSE_MIN_MS`, `BLOWHORN_TYPING_MICRO_PAUSE_MAX_MS`, `BLOWHORN_TYPING_LONG_PAUSE_MIN_CHARS`, `BLOWHORN_TYPING_LONG_PAUSE_MAX_CHARS`, `BLOWHORN_TYPING_LONG_PAUSE_MIN_MS`, `BLOWHORN_TYPING_LONG_PAUSE_MAX_MS` | 7, 50, 220, 45, 85, 350, 1250 | Short hesitations between keys and longer pauses every so many keys. Playwright only: the extension driver sends one key per message and runs no pause plan (see below) |
 | `defaults.typing_allow_mistakes`, `defaults.typing_mistake_rate_pct`, `defaults.typing_max_mistakes_per_entry`, `defaults.typing_mistake_min_text_length`, `defaults.typing_mistake_delay_min_ms`, `defaults.typing_mistake_delay_max_ms`, `defaults.typing_mistake_pause_min_ms`, `defaults.typing_mistake_pause_max_ms` | `BLOWHORN_TYPING_ALLOW_MISTAKES`, `BLOWHORN_TYPING_MISTAKE_RATE_PCT`, `BLOWHORN_TYPING_MAX_MISTAKES_PER_ENTRY`, `BLOWHORN_TYPING_MISTAKE_MIN_TEXT_LENGTH`, `BLOWHORN_TYPING_MISTAKE_DELAY_MIN_MS`, `BLOWHORN_TYPING_MISTAKE_DELAY_MAX_MS`, `BLOWHORN_TYPING_MISTAKE_PAUSE_MIN_MS`, `BLOWHORN_TYPING_MISTAKE_PAUSE_MAX_MS` | on, 3, 4, 20, 55, 170, 80, 350 | Whether a typed entry may include a wrong key that is then corrected, how often, and the pauses around the correction. Playwright only, never on sign-in (see below) |
 | `defaults.pointer_click_hold_min_ms`, `defaults.pointer_click_hold_max_ms`, `defaults.pointer_key_dwell_min_ms`, `defaults.pointer_key_dwell_max_ms`, `defaults.pointer_hover_pause_min_ms`, `defaults.pointer_hover_pause_max_ms` | `BLOWHORN_POINTER_CLICK_HOLD_MIN_MS`, `BLOWHORN_POINTER_CLICK_HOLD_MAX_MS`, `BLOWHORN_POINTER_KEY_DWELL_MIN_MS`, `BLOWHORN_POINTER_KEY_DWELL_MAX_MS`, `BLOWHORN_POINTER_HOVER_PAUSE_MIN_MS`, `BLOWHORN_POINTER_HOVER_PAUSE_MAX_MS` | 40, 140, 25, 90, 50, 250 | How long a click stays held, how long a key stays pressed, and the pause after the pointer arrives before a click, all in milliseconds (see below) |
 | `defaults.logs.directory` | `BLOWHORN_LOG_DIR` | `data/logs/` in the checkout | Where daily logs go |
 | `defaults.logs.retention_days` | `BLOWHORN_LOG_RETENTION_DAYS` | 30 | Days of daily logs kept; 0 keeps all |
-| `defaults.diagnostics.enabled` | `BLOWHORN_DIAGNOSTICS_ENABLED` | on | Queue and send anonymous failure reports (see [Failure reports](/docs/explanation/your-data/#failure-reports)); off means nothing is queued or sent, and the Send failure reports switch in Posture is the same choice |
+| `defaults.diagnostics.enabled` | `BLOWHORN_DIAGNOSTICS_ENABLED` | on | Queue and send anonymous failure reports (see [Failure reports](/docs/explanation/your-data/#failure-reports)); off means nothing is queued or sent, and the Send failure reports switch in Posture is the same choice. Only an on word (`1`, `true`, `yes`, `y` or `on`, in any case) turns them on; anything else written there (`false`, `0`, an empty value) turns them off |
 | `defaults.chrome.launch_mode` | `BLOWHORN_CHROME_LAUNCH` | `extension` | How a run reaches Google Chrome |
 | `defaults.chrome.automation_data_dir` | `BLOWHORN_CHROME_AUTOMATION_DATA_DIR` | Blowhorn's own directory | Where a launched Chrome keeps its session |
 | `defaults.chrome.data_dir` | `BLOWHORN_CHROME_DATA_DIR` | Your real Chrome directory | Where the installed Chrome is read from |
@@ -186,7 +198,7 @@ Local hours with no public actions: cautious 22:00 to 07:00, standard and brisk 
 
 ### Outreach
 
-Whether connect, invite and follow actions may run: cautious off, standard on established platforms only (off on platforms still marked experimental in the Risk Profile table: Facebook, Instagram, TikTok, and YouTube, which is otherwise a supported platform), brisk on everywhere, including those platforms. When outreach is off, the gate refuses the action with the preset named, rather than queuing it silently.
+Whether connect, invite and follow actions may run: cautious off, standard on established platforms only (off on platforms still marked experimental in the Risk Profile table), brisk on everywhere, including those platforms. Facebook, Instagram and TikTok are still being built. YouTube is a supported platform and stays experimental. Weapons free turns outreach on for it, and there is no subscribe command yet, so a subscribe does not run. When outreach is off, the gate refuses the action with the preset named, rather than queuing it silently. YouTube's per-activity ceilings (uploads, Posts-tab posts, comments, replies, likes, subscribes) are Blowhorn's own and are not this gate; the Data API project quota is not this gate either. Both are on the [YouTube](/docs/reference/platforms/youtube/#per-profile-daily-ceilings) page.
 
 ### Pause after a challenge
 
@@ -337,7 +349,9 @@ caps as `invalid` with the reason.
 ## Output logging
 
 The daily log is a copy; the terminal streams are never dropped, piped
-or not. The directory resolves as `--log-dir`, then `BLOWHORN_LOG_DIR`,
+or not. A line holding text that cannot be written as UTF-8 (a byte that
+was not UTF-8 in an argument, say) is written with that part escaped
+(`\udcff`), never left out. The directory resolves as `--log-dir`, then `BLOWHORN_LOG_DIR`,
 then `defaults.logs.directory`, then the checkout's `data/logs/`. That
 directory is the parent. Each signed-in account keeps its own logs under
 `accounts/<user id>` inside it (the account id, never a name or an email).

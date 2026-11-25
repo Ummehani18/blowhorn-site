@@ -10,6 +10,12 @@ import worker, {
   createHandler,
   createScheduledHandler,
   d1Db,
+  retryUnforwardedSupport,
+  supportRetryDelayMs,
+  SUPPORT_RETRY_BATCH,
+  SUPPORT_RETRY_MAX_ATTEMPTS,
+  SUPPORT_RETRY_BASE_MS,
+  SUPPORT_RETRY_MAX_DELAY_MS,
   THANKS_URL,
   safeBackLink,
   escHtml,
@@ -72,6 +78,14 @@ function fakeDb() {
     async markSupportForwarded(id) {
       const row = this.supportRows.find((r) => r.id === id);
       if (row) row.forwarded_at = '2026-11-20T00:00:00.000Z';
+    },
+    async recordSupportForwardFailure(id, status, nextAt) {
+      const row = this.supportRows.find((r) => r.id === id);
+      if (row) {
+        row.forward_attempts = (row.forward_attempts || 0) + 1;
+        row.forward_last_status = status;
+        row.next_forward_at = nextAt;
+      }
     },
   };
 }
@@ -780,14 +794,15 @@ function supportBody(overrides = {}) {
   };
 }
 
-test('support message stores one row and forwards to the queue', async () => {
+test('support message stores one row and creates the durable case', async () => {
   const db = fakeDb();
   const calls = [];
   const forward = {
-    url: 'https://cloud.example.test/api/marketing/forms/blowhorn-support',
+    url: 'https://cloud.example.test/api/support/cases',
+    clientKey: 'website-key',
     fetchImpl: async (url, init) => {
-      calls.push({ url, body: JSON.parse(init.body) });
-      return { ok: true };
+      calls.push({ url, headers: init.headers, body: JSON.parse(init.body) });
+      return { ok: true, status: 201 };
     },
   };
   const res = await createHandler(db, { forward })(post('/api/support', supportBody()));
@@ -797,18 +812,65 @@ test('support message stores one row and forwards to the queue', async () => {
   const row = db.supportRows[0];
   assert.equal(row.name, 'Ada Lovelace');
   assert.equal(row.email, 'ada@example.com');
-  assert.equal(row.subject, 'Cannot sign in');
+  assert.match(row.case_number, /^[0-9a-f-]{36}$/);
+  assert.equal(row.subject, `Feedback [${row.case_number}]`);
   assert.equal(row.details, 'blowhorn login\nexit code 3');
   assert.equal(row.source_page, '/support/');
+  assert.match(row.creation_proof, /^[0-9a-f]{64}$/);
   assert.ok(row.forwarded_at);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url, forward.url);
+  assert.equal(calls[0].headers['x-client-key'], 'website-key');
+  assert.equal(calls[0].headers['x-support-creation-proof'], row.creation_proof);
+  assert.equal(calls[0].body.caseId, row.case_number);
+  assert.equal(calls[0].body.reason, 'feedback');
+  assert.equal(calls[0].body.contactPreference, 'reply');
   assert.equal(calls[0].body.email, 'ada@example.com');
   assert.equal(calls[0].body.name, 'Ada Lovelace');
-  assert.equal(calls[0].body.subject, '[Blowhorn support] Cannot sign in');
   assert.match(calls[0].body.message, /The app refuses my profile\./);
   assert.match(calls[0].body.message, /exit code 3/);
-  assert.deepEqual(Object.keys(calls[0].body).sort(), ['email', 'message', 'name', 'subject']);
+  assert.deepEqual(Object.keys(calls[0].body).sort(), ['caseId', 'contactPreference', 'email', 'message', 'name', 'reason']);
+});
+
+test('an identical-payload replay (200) also marks the row forwarded', async () => {
+  const db = fakeDb();
+  const forward = {
+    url: 'https://cloud.example.test/api/support/cases',
+    clientKey: 'website-key',
+    fetchImpl: async () => ({ ok: true, status: 200 }),
+  };
+  const res = await createHandler(db, { forward })(post('/api/support', supportBody()));
+  assert.equal(res.status, 200);
+  assert.ok(db.supportRows[0].forwarded_at);
+});
+
+test('a payload conflict (409) leaves the row unforwarded for investigation', async () => {
+  const db = fakeDb();
+  const forward = {
+    url: 'https://cloud.example.test/api/support/cases',
+    clientKey: 'website-key',
+    fetchImpl: async () => ({ ok: false, status: 409 }),
+  };
+  const res = await createHandler(db, { forward })(post('/api/support', supportBody()));
+  assert.equal(res.status, 200);
+  assert.equal(db.supportRows[0].forwarded_at, null);
+});
+
+test('a configured URL without the client key stores only', async () => {
+  const db = fakeDb();
+  let called = 0;
+  const forward = {
+    url: 'https://cloud.example.test/api/support/cases',
+    clientKey: '',
+    fetchImpl: async () => {
+      called += 1;
+      return { ok: true, status: 201 };
+    },
+  };
+  const res = await createHandler(db, { forward })(post('/api/support', supportBody()));
+  assert.equal(res.status, 200);
+  assert.equal(called, 0);
+  assert.equal(db.supportRows[0].forwarded_at, null);
 });
 
 test('support form post redirects to the support thanks page', async () => {
@@ -823,12 +885,8 @@ test('support validation rejects missing and over-long fields', async () => {
   const db = fakeDb();
   const handle = createHandler(db);
   for (const body of [
-    supportBody({ name: '' }),
     supportBody({ name: 'x'.repeat(101) }),
     supportBody({ email: 'not-an-email' }),
-    supportBody({ subject: '' }),
-    supportBody({ subject: 'x'.repeat(200) }),
-    supportBody({ subject: 'x'.repeat(201) }),
     supportBody({ message: '' }),
     supportBody({ message: 'x'.repeat(5001) }),
     supportBody({ details: 'x'.repeat(5001) }),
@@ -844,10 +902,11 @@ test('support honeypot answers success without storing or forwarding', async () 
   const db = fakeDb();
   let called = 0;
   const forward = {
-    url: 'https://cloud.example.test/api/marketing/forms/blowhorn-support',
+    url: 'https://cloud.example.test/api/support/cases',
+    clientKey: 'website-key',
     fetchImpl: async () => {
       called += 1;
-      return { ok: true };
+      return { ok: true, status: 201 };
     },
   };
   const res = await createHandler(db, { forward })(
@@ -867,7 +926,8 @@ test('support honeypot answers success without storing or forwarding', async () 
 test('a failed forward keeps the row and leaves forwarded_at null', async () => {
   const db = fakeDb();
   const forward = {
-    url: 'https://cloud.example.test/api/marketing/forms/blowhorn-support',
+    url: 'https://cloud.example.test/api/support/cases',
+    clientKey: 'website-key',
     fetchImpl: async () => ({ ok: false, status: 401 }),
   };
   const res = await createHandler(db, { forward })(post('/api/support', supportBody()));
@@ -875,7 +935,8 @@ test('a failed forward keeps the row and leaves forwarded_at null', async () => 
   assert.equal(db.supportRows.length, 1);
   assert.equal(db.supportRows[0].forwarded_at, null);
   const throwing = {
-    url: 'https://cloud.example.test/api/marketing/forms/blowhorn-support',
+    url: 'https://cloud.example.test/api/support/cases',
+    clientKey: 'website-key',
     fetchImpl: async () => {
       throw new Error('network down');
     },
@@ -900,7 +961,8 @@ test('the forward sends the full name as typed', async () => {
   const db = fakeDb();
   const calls = [];
   const forward = {
-    url: 'https://cloud.example.test/api/marketing/forms/blowhorn-support',
+    url: 'https://cloud.example.test/api/support/cases',
+    clientKey: 'website-key',
     fetchImpl: async (url, init) => {
       calls.push(JSON.parse(init.body));
       return { ok: false, status: 400 };
@@ -908,7 +970,7 @@ test('the forward sends the full name as typed', async () => {
   };
   await createHandler(db, { forward })(post('/api/support', supportBody({ name: 'Madonna' })));
   assert.equal(calls[0].name, 'Madonna');
-  assert.deepEqual(Object.keys(calls[0]).sort(), ['email', 'message', 'name', 'subject']);
+  assert.deepEqual(Object.keys(calls[0]).sort(), ['caseId', 'contactPreference', 'email', 'message', 'name', 'reason']);
   assert.equal(db.supportRows[0].forwarded_at, null);
 });
 
@@ -921,4 +983,426 @@ test('support shares the per-IP rate limit', async () => {
   }
   assert.equal(last.status, 429);
   assert.equal(db.supportRows.length, 30);
+});
+
+
+test('anonymous choice discards contact fields before storage and forwarding', async () => {
+  const db = fakeDb();
+  let payload;
+  const forward = { url: 'https://cloud.example.test/api/support/cases', clientKey: 'website-key', fetchImpl: async (url, init) => {
+    payload = JSON.parse(init.body); return { ok: true, status: 201 };
+  } };
+  const res = await createHandler(db, { forward })(post('/api/support', supportBody({
+    contact_preference: 'anonymous', email: 'accidental@example.com', name: 'Do not retain',
+    reason: 'issue', subject: '', diagnostics_reference: 'local-report-123',
+  })));
+  assert.equal(res.status, 200);
+  assert.equal(db.supportRows[0].email, '');
+  assert.equal(db.supportRows[0].name, '');
+  assert.equal(db.supportRows[0].contact_preference, 'anonymous');
+  assert.equal(db.supportRows[0].reason, 'issue');
+  assert.equal(db.supportRows[0].subject, `Problem report [${db.supportRows[0].case_number}]`);
+  assert.equal(db.supportRows[0].diagnostics_reference, 'local-report-123');
+  assert.equal(payload.contactPreference, 'anonymous');
+  assert.equal(payload.reason, 'issue');
+  assert.ok(!('email' in payload));
+  assert.ok(!('name' in payload));
+  assert.match(payload.message, /local-report-123/);
+  assert.doesNotMatch(JSON.stringify(payload), /accidental|Do not retain/);
+});
+
+test('minimal anonymous submission needs only a message', async () => {
+  const db = fakeDb();
+  const res = await createHandler(db)(post('/api/support', { message: 'An idea for you.' }));
+  assert.equal(res.status, 200);
+  assert.equal(db.supportRows[0].reason, 'feedback');
+  assert.equal(db.supportRows[0].contact_preference, 'anonymous');
+});
+
+test('response requires email, not name', async () => {
+  for (const choice of ['reply']) {
+    const db = fakeDb();
+    const handle = createHandler(db);
+    const invalid = await handle(post('/api/support', supportBody({ contact_preference: choice, email: '' })));
+    assert.equal(invalid.status, 400);
+    const valid = await handle(formPost('/api/support', supportBody({ contact_preference: choice, name: '' })));
+    assert.equal(valid.status, 303);
+    assert.equal(db.supportRows[0].contact_preference, choice);
+    assert.equal(db.supportRows[0].email, 'ada@example.com');
+    assert.equal(db.supportRows[0].name, '');
+  }
+});
+
+test('support rejects invalid preferences, reasons and diagnostic references', async () => {
+  const handle = createHandler(fakeDb());
+  for (const overrides of [
+    { reason: 'other-unknown' }, { reason: '__proto__' }, { contact_preference: 'subscribe' }, { contact_preference: 'fix-update' },
+    { diagnostics_reference: 'x'.repeat(501) }, { diagnostics_reference: 'one\ntwo' },
+    { contact_preference: 'reply', email: 'bad' },
+  ]) {
+    const res = await handle(post('/api/support', supportBody(overrides)));
+    assert.equal(res.status, 400);
+  }
+});
+
+test('multipart anonymous submission strips accidental identity too', async () => {
+  const db = fakeDb();
+  const form = new FormData();
+  for (const [key, value] of Object.entries(supportBody({ contact_preference: 'anonymous', reason: 'product' }))) {
+    form.set(key, value);
+  }
+  const request = new Request('https://api.blowhorn.ai/api/support', { method: 'POST', body: form });
+  const res = await createHandler(db)(request);
+  assert.equal(res.status, 303);
+  assert.equal(db.supportRows[0].email, '');
+  assert.equal(db.supportRows[0].reason, 'product');
+});
+
+test('support reason is a string, not a coerced array', async () => {
+  const res = await createHandler(fakeDb())(post('/api/support', supportBody({ reason: ['issue'] })));
+  assert.equal(res.status, 400);
+});
+
+test('support migration preserves existing rows and adapter stores anonymous metadata', async () => {
+  const sqlite = new DatabaseSync(':memory:');
+  const here = dirname(fileURLToPath(import.meta.url));
+  sqlite.exec(readFileSync(join(here, 'migrations/0003_support_messages.sql'), 'utf8'));
+  sqlite.prepare('INSERT INTO support_messages (name,email,subject,message,created_at) VALUES (?,?,?,?,?)')
+    .run('Original', 'old@example.com', 'Old', 'Old message', '2026-11-20');
+  sqlite.exec(readFileSync(join(here, 'migrations/0004_support_preferences.sql'), 'utf8'));
+  const old = sqlite.prepare('SELECT * FROM support_messages WHERE id=1').get();
+  assert.equal(old.email, 'old@example.com');
+  assert.equal(old.contact_preference, 'reply');
+  assert.equal(old.reason, 'feedback');
+  sqlite.exec(readFileSync(join(here, 'migrations/0005_support_case_proof.sql'), 'utf8'));
+  assert.equal(sqlite.prepare('SELECT creation_proof FROM support_messages WHERE id=1').get().creation_proof, null);
+  const adapter = d1Db({ prepare(sql) { return { bind(...params) { return {
+    run() { const result = sqlite.prepare(sql).run(...params); return { meta: { last_row_id: Number(result.lastInsertRowid) } }; },
+  }; } }; } });
+  const id = await adapter.insertSupportMessage({ name: '', email: '', subject: 'Feedback', message: 'Hello',
+    details: '', created_at: '2026-11-23', source_page: '/support/', reason: 'feedback',
+    contact_preference: 'anonymous', diagnostics_reference: 'local-123', case_number: crypto.randomUUID(),
+    creation_proof: 'a'.repeat(64) });
+  await adapter.markSupportForwarded(id);
+  const row = sqlite.prepare('SELECT * FROM support_messages WHERE id=?').get(id);
+  assert.equal(row.name, '');
+  assert.equal(row.email, '');
+  assert.equal(row.contact_preference, 'anonymous');
+  assert.equal(row.diagnostics_reference, 'local-123');
+  assert.equal(row.creation_proof, 'a'.repeat(64));
+  assert.ok(row.forwarded_at);
+  sqlite.close();
+});
+
+test('case numbers are server generated, unique, and subjects ignore client overrides', async () => {
+  const db = fakeDb();
+  const calls = [];
+  const forward = { url: 'https://cloud.example.test/api/support/cases', clientKey: 'website-key', fetchImpl: async (url, init) => {
+    calls.push(JSON.parse(init.body)); return { ok: true, status: 201 };
+  } };
+  const handle = createHandler(db, { forward });
+  for (const reason of ['feedback', 'issue', 'product', 'pricing', 'connect']) {
+    const res = await handle(post('/api/support', supportBody({ reason,
+      subject: 'User-supplied subject must not be used'.repeat(20), case_number: 'attacker-selected-id',
+    })));
+    assert.equal(res.status, 200);
+  }
+  const ids = db.supportRows.map(row => row.case_number);
+  assert.equal(new Set(ids).size, 5);
+  for (const [i, row] of db.supportRows.entries()) {
+    assert.match(row.case_number, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    assert.ok(row.subject.includes(row.case_number));
+    assert.equal(calls[i].caseId, row.case_number);
+    assert.equal(calls[i].reason, row.reason);
+    assert.doesNotMatch(JSON.stringify(calls[i]), /User-supplied|attacker-selected/);
+  }
+});
+
+test('the deployed entry point forwards a support message with the runtime fetch', async () => {
+  // Workers throws "Illegal invocation" when fetch is called with any `this`
+  // other than the global scope, e.g. as `forward.fetchImpl(...)`. Node does
+  // not, so the stub enforces the runtime's rule.
+  const sqlite = new DatabaseSync(':memory:');
+  const here = dirname(fileURLToPath(import.meta.url));
+  for (const m of ['0001_init.sql', '0002_rate_limits_window_idx.sql', '0003_support_messages.sql',
+    '0004_support_preferences.sql', '0005_support_case_proof.sql']) {
+    sqlite.exec(readFileSync(join(here, 'migrations', m), 'utf8'));
+  }
+  const SIGNUPS_DB = { prepare(sql) { const stmt = sqlite.prepare(sql); return { bind(...params) { return {
+    first() { return stmt.get(...params) || null; },
+    all() { return { results: stmt.all(...params) }; },
+    run() { const r = stmt.run(...params); return { success: true, meta: { last_row_id: Number(r.lastInsertRowid) } }; },
+  }; } }; } };
+  const calls = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = function fetch(url, init) {
+    if (this !== undefined && this !== globalThis) {
+      throw new TypeError('Illegal invocation: function called with incorrect `this` reference.');
+    }
+    calls.push({ url, headers: init.headers, body: JSON.parse(init.body) });
+    return Promise.resolve(new Response('{}', { status: 201 }));
+  };
+  try {
+    const env = { SIGNUPS_DB, SUPPORT_CASES_URL: 'https://cloud.example.test/api/support/cases', SUPPORT_CASES_CLIENT_KEY: 'website-key' };
+    const res = await worker.fetch(post('/api/support', supportBody()), env);
+    assert.equal(res.status, 200);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'https://cloud.example.test/api/support/cases');
+  assert.equal(calls[0].headers['x-client-key'], 'website-key');
+  const row = sqlite.prepare('SELECT case_number, forwarded_at FROM support_messages').get();
+  assert.equal(calls[0].body.caseId, row.case_number);
+  assert.ok(row.forwarded_at, 'a 201 from Cloud marks the row forwarded');
+  sqlite.close();
+});
+
+// Scheduled retry of unforwarded support cases, over a real SQLite D1 with
+// every migration applied.
+
+const ALL_MIGRATIONS = ['0001_init.sql', '0002_rate_limits_window_idx.sql', '0003_support_messages.sql',
+  '0004_support_preferences.sql', '0005_support_case_proof.sql', '0006_support_forward_retry.sql'];
+
+function sqliteD1() {
+  const sqlite = new DatabaseSync(':memory:');
+  const here = dirname(fileURLToPath(import.meta.url));
+  for (const m of ALL_MIGRATIONS) sqlite.exec(readFileSync(join(here, 'migrations', m), 'utf8'));
+  const binding = { prepare(sql) { const stmt = sqlite.prepare(sql); return { bind(...params) { return {
+    first() { return stmt.get(...params) || null; },
+    all() { return { results: stmt.all(...params) }; },
+    run() { const r = stmt.run(...params); return { success: true, meta: { last_row_id: Number(r.lastInsertRowid) } }; },
+  }; } }; } };
+  return { sqlite, binding, db: d1Db(binding) };
+}
+
+function insertRow(sqlite, overrides = {}) {
+  const row = {
+    name: 'Ada Lovelace', email: 'ada@example.com', subject: 'Feedback [x]', message: 'Hello',
+    details: '', created_at: '2026-11-24T00:00:00.000Z', source_page: '/support/', reason: 'feedback',
+    contact_preference: 'reply', diagnostics_reference: '', case_number: crypto.randomUUID(),
+    creation_proof: 'b'.repeat(64), forwarded_at: null, forward_attempts: 0, forward_last_status: null,
+    next_forward_at: null, ...overrides,
+  };
+  const cols = Object.keys(row);
+  const r = sqlite.prepare(`INSERT INTO support_messages (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`)
+    .run(...cols.map((c) => row[c]));
+  return Number(r.lastInsertRowid);
+}
+
+function getRow(sqlite, id) {
+  return { ...sqlite.prepare('SELECT * FROM support_messages WHERE id = ?').get(id) };
+}
+
+function recordingForward(statusFor = () => 201) {
+  const calls = [];
+  return {
+    calls,
+    url: 'https://cloud.example.test/api/support/cases',
+    clientKey: 'website-key',
+    fetchImpl: async (url, init) => {
+      const body = JSON.parse(init.body);
+      calls.push({ url, headers: init.headers, rawBody: init.body, body });
+      const status = statusFor(body, calls.length);
+      if (status instanceof Error) throw status;
+      return { ok: status >= 200 && status < 300, status };
+    },
+  };
+}
+
+const NOW = Date.parse('2026-11-25T03:00:00.000Z');
+
+test('a failed request-path forward is replayed by the cron with the identical case, proof and payload', async () => {
+  const { sqlite, binding } = sqliteD1();
+  const failing = recordingForward(() => 503);
+  const res = await createHandler(d1Db(binding), { forward: failing })(post('/api/support', supportBody({
+    reason: 'issue', diagnostics_reference: 'local-ref-1',
+  })));
+  assert.equal(res.status, 200);
+  const sent = failing.calls[0];
+  const stored = sqlite.prepare('SELECT * FROM support_messages').get();
+  assert.equal(stored.forwarded_at, null);
+  assert.equal(stored.forward_attempts, 1, 'the request-path failure counts as the first attempt');
+  assert.equal(stored.forward_last_status, 503);
+  assert.ok(stored.next_forward_at);
+
+  const replay = recordingForward(() => 200);
+  const later = Date.parse(stored.next_forward_at) + 1;
+  await createScheduledHandler(d1Db(binding), () => later, { forward: replay })({ scheduledTime: later });
+  assert.equal(replay.calls.length, 1);
+  assert.equal(replay.calls[0].rawBody, sent.rawBody, 'the replay body is byte-identical');
+  assert.equal(replay.calls[0].headers['x-support-creation-proof'], stored.creation_proof);
+  assert.equal(replay.calls[0].headers['x-support-creation-proof'], sent.headers['x-support-creation-proof']);
+  assert.equal(replay.calls[0].body.caseId, stored.case_number);
+  const after = sqlite.prepare('SELECT * FROM support_messages').get();
+  assert.equal(after.case_number, stored.case_number, 'no new case id is minted');
+  assert.equal(after.creation_proof, stored.creation_proof);
+  assert.equal(after.forwarded_at, new Date(later).toISOString());
+  sqlite.close();
+});
+
+test('pre-contract rows without a case number or proof are never sent or modified', async () => {
+  const { sqlite, db } = sqliteD1();
+  const noCase = insertRow(sqlite, { case_number: null, creation_proof: null, email: 'e2e-test@example.com' });
+  const noProof = insertRow(sqlite, { creation_proof: null });
+  const before = [getRow(sqlite, noCase), getRow(sqlite, noProof)];
+  const forward = recordingForward();
+  const summary = await retryUnforwardedSupport(db, forward, NOW);
+  assert.deepEqual(summary, { selected: 0, forwarded: 0, failed: 0 });
+  assert.equal(forward.calls.length, 0);
+  assert.deepEqual([getRow(sqlite, noCase), getRow(sqlite, noProof)], before);
+  sqlite.close();
+});
+
+test('forwarded rows are never re-sent and keep their forwarded_at', async () => {
+  const { sqlite, db } = sqliteD1();
+  const id = insertRow(sqlite, { forwarded_at: '2026-11-24T22:33:04.916Z' });
+  const before = getRow(sqlite, id);
+  const forward = recordingForward();
+  await retryUnforwardedSupport(db, forward, NOW);
+  assert.equal(forward.calls.length, 0);
+  assert.deepEqual(getRow(sqlite, id), before);
+  sqlite.close();
+});
+
+test('forwarded_at is set only on 201 or 200; failures back off and count attempts', async () => {
+  const { sqlite, db } = sqliteD1();
+  const created = insertRow(sqlite);
+  const replayed = insertRow(sqlite);
+  const serverError = insertRow(sqlite);
+  const thrown = insertRow(sqlite);
+  const statuses = { 1: 201, 2: 200, 3: 500 };
+  const forward = recordingForward((body, n) => statuses[n] ?? new TypeError('network down'));
+  const summary = await retryUnforwardedSupport(db, forward, NOW);
+  assert.deepEqual(summary, { selected: 4, forwarded: 2, failed: 2 });
+  assert.equal(getRow(sqlite, created).forwarded_at, new Date(NOW).toISOString());
+  assert.equal(getRow(sqlite, replayed).forwarded_at, new Date(NOW).toISOString());
+  const err = getRow(sqlite, serverError);
+  assert.equal(err.forwarded_at, null);
+  assert.equal(err.forward_attempts, 1);
+  assert.equal(err.forward_last_status, 500);
+  assert.equal(err.next_forward_at, new Date(NOW + SUPPORT_RETRY_BASE_MS).toISOString());
+  const threw = getRow(sqlite, thrown);
+  assert.equal(threw.forwarded_at, null);
+  assert.equal(threw.forward_attempts, 1);
+  assert.equal(threw.forward_last_status, 0, 'a thrown fetch records status 0');
+  sqlite.close();
+});
+
+test('a row is not retried before its backoff elapses, then is retried once due', async () => {
+  const { sqlite, db } = sqliteD1();
+  const id = insertRow(sqlite, { forward_attempts: 3, forward_last_status: 503,
+    next_forward_at: new Date(NOW + 60000).toISOString() });
+  const early = recordingForward();
+  await retryUnforwardedSupport(db, early, NOW);
+  assert.equal(early.calls.length, 0);
+  const due = recordingForward(() => 502);
+  await retryUnforwardedSupport(db, due, NOW + 60000);
+  assert.equal(due.calls.length, 1);
+  const row = getRow(sqlite, id);
+  assert.equal(row.forward_attempts, 4);
+  assert.equal(row.next_forward_at, new Date(NOW + 60000 + supportRetryDelayMs(4)).toISOString());
+  sqlite.close();
+});
+
+test('backoff doubles from the base and caps at the maximum delay', () => {
+  assert.equal(supportRetryDelayMs(1), SUPPORT_RETRY_BASE_MS);
+  assert.equal(supportRetryDelayMs(2), 2 * SUPPORT_RETRY_BASE_MS);
+  assert.equal(supportRetryDelayMs(3), 4 * SUPPORT_RETRY_BASE_MS);
+  assert.equal(supportRetryDelayMs(30), SUPPORT_RETRY_MAX_DELAY_MS);
+});
+
+test('rows at the attempt cap, 409 conflicts and rows still in their first minutes are skipped', async () => {
+  const { sqlite, db } = sqliteD1();
+  const capped = insertRow(sqlite, { forward_attempts: SUPPORT_RETRY_MAX_ATTEMPTS, forward_last_status: 503 });
+  const conflict = insertRow(sqlite, { forward_attempts: 1, forward_last_status: 409 });
+  const fresh = insertRow(sqlite, { created_at: new Date(NOW - 30000).toISOString() });
+  const before = [capped, conflict, fresh].map((id) => getRow(sqlite, id));
+  const forward = recordingForward();
+  await retryUnforwardedSupport(db, forward, NOW);
+  assert.equal(forward.calls.length, 0);
+  assert.deepEqual([capped, conflict, fresh].map((id) => getRow(sqlite, id)), before);
+  sqlite.close();
+});
+
+test('a 409 on retry stops further retries for that case', async () => {
+  const { sqlite, db } = sqliteD1();
+  const id = insertRow(sqlite);
+  await retryUnforwardedSupport(db, recordingForward(() => 409), NOW);
+  assert.equal(getRow(sqlite, id).forward_last_status, 409);
+  const again = recordingForward();
+  await retryUnforwardedSupport(db, again, NOW + SUPPORT_RETRY_MAX_DELAY_MS);
+  assert.equal(again.calls.length, 0);
+  assert.equal(getRow(sqlite, id).forwarded_at, null);
+  sqlite.close();
+});
+
+test('each run sends at most the batch cap, oldest first', async () => {
+  const { sqlite, db } = sqliteD1();
+  const ids = Array.from({ length: SUPPORT_RETRY_BATCH + 3 }, () => insertRow(sqlite));
+  const forward = recordingForward();
+  const summary = await retryUnforwardedSupport(db, forward, NOW);
+  assert.equal(summary.selected, SUPPORT_RETRY_BATCH);
+  assert.equal(forward.calls.length, SUPPORT_RETRY_BATCH);
+  const caseIds = ids.map((id) => getRow(sqlite, id).case_number);
+  assert.deepEqual(forward.calls.map((c) => c.body.caseId), caseIds.slice(0, SUPPORT_RETRY_BATCH));
+  const second = recordingForward();
+  await retryUnforwardedSupport(db, second, NOW + 1);
+  assert.deepEqual(second.calls.map((c) => c.body.caseId), caseIds.slice(SUPPORT_RETRY_BATCH));
+  sqlite.close();
+});
+
+test('the retry only calls the configured cases URL and anonymous rows send no identity', async () => {
+  const { sqlite, db } = sqliteD1();
+  insertRow(sqlite, { name: '', email: '', contact_preference: 'anonymous' });
+  const forward = recordingForward();
+  await retryUnforwardedSupport(db, forward, NOW);
+  assert.equal(forward.calls.length, 1);
+  assert.equal(forward.calls[0].url, 'https://cloud.example.test/api/support/cases');
+  assert.deepEqual(Object.keys(forward.calls[0].body).sort(), ['caseId', 'contactPreference', 'message', 'reason']);
+  sqlite.close();
+});
+
+test('without a configured forward the cron only prunes', async () => {
+  const { sqlite, db } = sqliteD1();
+  const id = insertRow(sqlite);
+  const before = getRow(sqlite, id);
+  await createScheduledHandler(db, () => NOW)({ scheduledTime: NOW });
+  assert.deepEqual(getRow(sqlite, id), before);
+  sqlite.close();
+});
+
+test('a prune failure still lets the retry run and is still reported', async () => {
+  const { sqlite, db } = sqliteD1();
+  const id = insertRow(sqlite);
+  db.pruneRateLimits = async () => { throw new Error('D1 transient failure'); };
+  const forward = recordingForward();
+  await assert.rejects(createScheduledHandler(db, () => NOW, { forward })({ scheduledTime: NOW }), /D1 transient failure/);
+  assert.equal(forward.calls.length, 1);
+  assert.ok(getRow(sqlite, id).forwarded_at);
+  sqlite.close();
+});
+
+test('the deployed scheduled entry point retries with the runtime fetch', async () => {
+  const { sqlite, binding } = sqliteD1();
+  const id = insertRow(sqlite);
+  const calls = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = function fetch(url, init) {
+    if (this !== undefined && this !== globalThis) {
+      throw new TypeError('Illegal invocation: function called with incorrect `this` reference.');
+    }
+    calls.push({ url, headers: init.headers });
+    return Promise.resolve(new Response('{}', { status: 201 }));
+  };
+  try {
+    const env = { SIGNUPS_DB: binding, SUPPORT_CASES_URL: 'https://cloud.example.test/api/support/cases', SUPPORT_CASES_CLIENT_KEY: 'website-key' };
+    await worker.scheduled({ scheduledTime: NOW }, env);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].headers['x-client-key'], 'website-key');
+  assert.equal(getRow(sqlite, id).forwarded_at, new Date(NOW).toISOString());
+  sqlite.close();
 });

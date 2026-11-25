@@ -489,6 +489,95 @@ class OpenNetworkListsTest(unittest.TestCase):
         self.assertEqual(self.found(), [])
 
 
+class HomeSoonSplitTest(unittest.TestCase):
+    """Issue #720: the built home page must not bring back a Coming soon split
+    (a group heading, or a label on a listed platform), while its out-of-scope
+    "coming soon" copy (team invites, the REST API) stays allowed."""
+
+    def setUp(self):
+        import shutil
+
+        import check_theme as check
+
+        self.check = check
+        self.tmp = Path(tempfile.mkdtemp())
+        self.root = self.tmp / "repo"
+        self.build = self.tmp / "public"
+        shutil.copytree(ROOT / "data", self.root / "data")
+        self.build.mkdir()
+
+    def tearDown(self):
+        import shutil
+
+        shutil.rmtree(self.tmp)
+
+    def problems(self, body, page="index.html"):
+        path = self.build / page
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"<html><body><main>{body}</main></body></html>", encoding="utf-8")
+        return self.check.check_home_soon_split(self.build, self.root)
+
+    def test_missing_pages_are_skipped(self):
+        self.assertEqual(self.check.check_home_soon_split(self.build, self.root), [])
+
+    def test_clean_home_passes(self):
+        self.assertEqual(self.problems("<h2>Every platform</h2><p>Instagram, YouTube and X.</p>"), [])
+
+    def test_out_of_scope_coming_soon_copy_passes(self):
+        body = (
+            '<p class="machines-footnote">Each profile posts as itself. Team invites are coming soon.</p>'
+            '<li><h3>REST API</h3><p class="label">Coming soon</p>'
+            "<p>Planned: every action over HTTP. Until it lands, use the CLI or MCP.</p></li>"
+        )
+        self.assertEqual(self.problems(body), [])
+
+    def test_coming_soon_group_heading_fails(self):
+        found = self.problems("<h2>Coming soon</h2><ul><li>Something</li></ul>")
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("Coming soon group heading", found[0])
+
+    def test_heading_with_inner_markup_fails(self):
+        found = self.problems('<h3 class="h3"><span>Coming</span> soon</h3>')
+        self.assertTrue(any("group heading" in p for p in found), found)
+
+    def test_sentence_calling_a_platform_coming_soon_fails(self):
+        found = self.problems("<p>Instagram is coming soon.</p>")
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("calls a listed platform coming soon", found[0])
+
+    def test_label_beside_a_platform_fails(self):
+        found = self.problems('<h3>Instagram</h3><p class="label">Coming soon</p>')
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("label beside a listed platform", found[0])
+
+    def test_label_before_a_platform_fails(self):
+        found = self.problems('<p class="label">Coming soon</p><h3>YouTube</h3>')
+        self.assertEqual(len(found), 1, found)
+
+    def test_a_label_two_blocks_away_from_a_platform_passes(self):
+        self.assertEqual(self.problems("<h3>Instagram</h3><p>Posts as itself.</p><p>Coming soon</p><p>More.</p>"), [])
+
+    def test_example_tab_placeholder_passes(self):
+        body = '<div class="tabs-soon"><p>Coming soon</p></div><h3>Instagram</h3>'
+        self.assertEqual(self.problems(body), [])
+
+    def test_script_and_style_text_is_ignored(self):
+        self.assertEqual(self.problems("<script>var s='Instagram coming soon'</script><style>.a{}</style>"), [])
+
+    def test_reveille_preview_is_scanned_when_built(self):
+        found = self.problems("<h2>Coming soon</h2>", page="home-reveille/index.html")
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("/home-reveille/index.html", found[0])
+
+    def test_other_pages_are_not_scanned_here(self):
+        found = self.problems("<h2>Coming soon</h2>", page="pricing/index.html")
+        self.assertEqual(found, [])
+
+    def test_main_reports_the_failure(self):
+        self.problems("<h2>Coming soon</h2>")
+        self.assertTrue(self.check.check_home_soon_split(self.build, self.root))
+
+
 class PlatformSoonCopyTest(unittest.TestCase):
     """The site's own copy must never call a listed platform coming soon,
     while "coming soon" copy that names no platform stays allowed and the

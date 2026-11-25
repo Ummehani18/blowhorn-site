@@ -1,31 +1,36 @@
 #!/usr/bin/env python3
 """Fail if the default Open Graph image is missing, the wrong size, or not
-wired as the site-wide default (issue #703).
+wired as the site-wide default, or if article and video pages lack their
+specific social metadata (issue #703, #699).
 
 Checks the built site:
 
 - static file assets/brand/marketing/blowhorn-og-1200x630.png is 1200x630
 - the home page, a docs page, a compare page, a legal page and a Field Manual
-  page each have one og:image pointing at that file, with width 1200, height
-  630, twitter:card summary_large_image, and twitter:image
-- a role page keeps its own art as og:image (not the default) and still has
-  exactly one og:image
+  page each have og:type website, one og:image pointing at that file with width 1200,
+  height 630, og:image:type image/png, twitter:card summary_large_image,
+  twitter:site, and twitter:image
+- a role page keeps its own art as og:image (not the default)
+- an article page has og:type article, article:published_time, author meta,
+  and article:tag
+- a video page has og:type video.other and uses its poster for og:image with
+  og:image:type image/webp
 
 Usage: check_og_image.py BUILD_DIR
 """
 
 from __future__ import annotations
 
+import struct
 import sys
 from html.parser import HTMLParser
 from pathlib import Path
-
-import struct
 
 DEFAULT_PATH = "assets/brand/marketing/blowhorn-og-1200x630.png"
 DEFAULT_WIDTH = 1200
 DEFAULT_HEIGHT = 630
 TWITTER_CARD = "summary_large_image"
+TWITTER_SITE = "@blowhorn_ai"
 
 # Pages that should use the site-wide default image.
 DEFAULT_PAGES = (
@@ -38,6 +43,10 @@ DEFAULT_PAGES = (
 
 # A role page must keep its own art. The slug is stable in data/roles.json.
 ROLE_PAGE = "for/devrel/index.html"
+
+# Sample article and video pages to verify specific metadata.
+ARTICLE_PAGE = "resources/articles/failed-posts-are-data/index.html"
+VIDEO_PAGE = "resources/videos/getting-started/battalion-thunder/index.html"
 
 
 class MetaCollector(HTMLParser):
@@ -97,6 +106,15 @@ def page_meta(root: Path, rel: str) -> tuple[MetaCollector | None, str | None]:
 
 def default_errors(rel: str, parser: MetaCollector, base: str) -> list[str]:
     errors = []
+    og_types = parser.values("property", "og:type")
+    if og_types != ["website"]:
+        errors.append(f"{rel}: og:type is {og_types}, expected ['website']")
+    tw_sites = parser.values("name", "twitter:site")
+    if tw_sites != [TWITTER_SITE]:
+        errors.append(f"{rel}: twitter:site is {tw_sites}, expected [{TWITTER_SITE!r}]")
+    img_types = parser.values("property", "og:image:type")
+    if img_types != ["image/png"]:
+        errors.append(f"{rel}: og:image:type is {img_types}, expected ['image/png']")
     images = parser.values("property", "og:image")
     if len(images) != 1:
         errors.append(f"{rel}: expected one og:image, found {len(images)}: {images}")
@@ -134,6 +152,49 @@ def role_errors(rel: str, parser: MetaCollector) -> list[str]:
     tw_images = parser.values("name", "twitter:image")
     if tw_images != images:
         errors.append(f"{rel}: twitter:image is {tw_images}, expected {images}")
+    tw_sites = parser.values("name", "twitter:site")
+    if tw_sites != [TWITTER_SITE]:
+        errors.append(f"{rel}: twitter:site is {tw_sites}, expected [{TWITTER_SITE!r}]")
+    return errors
+
+
+def article_errors(rel: str, parser: MetaCollector) -> list[str]:
+    errors = []
+    og_types = parser.values("property", "og:type")
+    if og_types != ["article"]:
+        errors.append(f"{rel}: og:type is {og_types}, expected ['article']")
+    published = parser.values("property", "article:published_time")
+    if not published or not published[0]:
+        errors.append(f"{rel}: missing article:published_time")
+    authors = parser.values("name", "author")
+    if not authors or not authors[0]:
+        errors.append(f"{rel}: missing author meta tag")
+    tags = parser.values("property", "article:tag")
+    if not tags:
+        errors.append(f"{rel}: expected article:tag tags, found none")
+    tw_sites = parser.values("name", "twitter:site")
+    if tw_sites != [TWITTER_SITE]:
+        errors.append(f"{rel}: twitter:site is {tw_sites}, expected [{TWITTER_SITE!r}]")
+    return errors
+
+
+def video_errors(rel: str, parser: MetaCollector) -> list[str]:
+    errors = []
+    og_types = parser.values("property", "og:type")
+    if og_types != ["video.other"]:
+        errors.append(f"{rel}: og:type is {og_types}, expected ['video.other']")
+    images = parser.values("property", "og:image")
+    if len(images) != 1:
+        errors.append(f"{rel}: expected one og:image, found {len(images)}: {images}")
+        return errors
+    if images[0].rstrip("/").endswith(DEFAULT_PATH):
+        errors.append(f"{rel}: og:image used the default lockup; video pages keep their poster")
+    img_types = parser.values("property", "og:image:type")
+    if img_types != ["image/webp"]:
+        errors.append(f"{rel}: og:image:type is {img_types}, expected ['image/webp']")
+    tw_sites = parser.values("name", "twitter:site")
+    if tw_sites != [TWITTER_SITE]:
+        errors.append(f"{rel}: twitter:site is {tw_sites}, expected [{TWITTER_SITE!r}]")
     return errors
 
 
@@ -151,6 +212,16 @@ def check(build_dir) -> list[str]:
         errors.append(missing)
     else:
         errors.extend(role_errors(ROLE_PAGE, parser))
+    parser, missing = page_meta(root, ARTICLE_PAGE)
+    if missing:
+        errors.append(missing)
+    else:
+        errors.extend(article_errors(ARTICLE_PAGE, parser))
+    parser, missing = page_meta(root, VIDEO_PAGE)
+    if missing:
+        errors.append(missing)
+    else:
+        errors.extend(video_errors(VIDEO_PAGE, parser))
     return errors
 
 

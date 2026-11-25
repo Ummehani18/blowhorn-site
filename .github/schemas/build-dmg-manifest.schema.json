@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blowhorn.ai/schemas/build-dmg-manifest.json",
+  "title": "build-dmg result manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "ref", "signing_mode", "sha256", "size_bytes", "dmg_name"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$"
+    },
+    "ref": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "signing_mode": { "enum": ["adhoc", "developer-id"] },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "size_bytes": { "type": "integer", "minimum": 1 },
+    "dmg_name": {
+      "type": "string",
+      "pattern": "^Blowhorn-[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?-universal\\.dmg$"
+    }
+  }
+}

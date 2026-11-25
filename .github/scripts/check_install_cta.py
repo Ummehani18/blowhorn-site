@@ -9,15 +9,19 @@ fails when:
 - a page's <main> holds more than one .button-primary. A form's own submit
   button (the newsletter and signup forms) is not a page call to action and
   is not counted, and the header, footer and cookie banner sit outside main;
-- a link or button carries an old install label ("Download free", "Enlist a
-  computer", "Download for Mac", "Get Blowhorn", "Download Blowhorn"), or
-  "Install the CLI" as a primary.
+- a link or button carries an old install label ("Download free", "Download
+  for Mac", "Get Blowhorn", "Download Blowhorn"), or "Install the CLI" as a
+  primary;
+- an "Enlist a computer" control is anything but the in-page recruit button,
+  `button[type=button][data-enlist]` with no href. It never navigates; before
+  #650 it linked to /download/, and that must not return (issue #720). The
+  no-JS "Download" link inside `data-machines-static` is a different control
+  and is allowed.
 
 Docs pages are synced from the product repository and are skipped. The home
-page is exempt from both rules (PENDING_HOME) until its rebuild (#418) lands:
-remove it from PENDING_HOME then. The Reveille home preview
-(home-reveille/index.html) is exempt for the same reason: it is the same home
-page under the other theme.
+page (and its Reveille preview) is exempt from the single-primary limit
+(PRIMARY_EXEMPT) because it holds hero, machine-panel and closing CTAs;
+old install labels and the Enlist rule are checked across every page.
 
 Usage: check_install_cta.py [BUILD_DIR]
 """
@@ -29,9 +33,9 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 PRIMARY_CLASS = "button-primary"
+ENLIST_LABEL = "Enlist a computer"
 OLD_LABELS = (
     "Download free",
-    "Enlist a computer",
     "Download for Mac",
     "Get Blowhorn",
     "Get Blowhorn for Mac",
@@ -40,7 +44,7 @@ OLD_LABELS = (
 )
 OLD_PRIMARY_LABELS = ("Install the CLI",)
 SKIP_PREFIXES = ("docs/",)
-PENDING_HOME = ("index.html", "home-reveille/index.html")
+PRIMARY_EXEMPT = ("index.html", "home-reveille/index.html")
 
 
 class Controls(HTMLParser):
@@ -60,9 +64,14 @@ class Controls(HTMLParser):
         elif tag == "form":
             self._form += 1
         elif tag in ("a", "button"):
-            classes = (dict(attrs).get("class") or "").split()
+            attributes = dict(attrs)
+            classes = (attributes.get("class") or "").split()
             self._open.append({
                 "tag": tag,
+                "href": attributes.get("href"),
+                "has_href": "href" in attributes,
+                "type": attributes.get("type"),
+                "enlist": "data-enlist" in attributes,
                 "primary": PRIMARY_CLASS in classes,
                 "in_main": self._main > 0,
                 "in_form": self._form > 0,
@@ -87,14 +96,44 @@ class Controls(HTMLParser):
             entry["text"].append(data)
 
 
+def is_enlist_button(control: dict) -> bool:
+    """The in-page recruit button: a button[type=button][data-enlist] that
+    carries no href, so a click can only act on the page."""
+    return (
+        control["tag"] == "button"
+        and control["type"] == "button"
+        and control["enlist"]
+        and not control.get("has_href")
+    )
+
+
+def enlist_problems_in(rel: str, html: str) -> list[str]:
+    """Every "Enlist a computer" control must be the in-page recruit button.
+    A link, or a button that is not marked data-enlist, would navigate or do
+    nothing, which is the regression issue #720 guards against."""
+    parser = Controls()
+    parser.feed(html)
+    problems = []
+    for control in parser.controls:
+        if control["label"] != ENLIST_LABEL or is_enlist_button(control):
+            continue
+        target = f" to {control['href']!r}" if control["href"] else ""
+        problems.append(
+            f"{rel}: {control['tag']} reads {ENLIST_LABEL!r} but is not "
+            f"button[type=button][data-enlist]{target}; the Enlist control stays in-page and never navigates"
+        )
+    return problems
+
+
 def problems_in(rel: str, html: str) -> list[str]:
     parser = Controls()
     parser.feed(html)
     problems = []
-    primaries = [c for c in parser.controls if c["primary"] and c["in_main"] and not c["in_form"]]
-    if len(primaries) > 1:
-        labels = ", ".join(repr(c["label"]) for c in primaries)
-        problems.append(f"{rel}: {len(primaries)} primary buttons in main ({labels}); a view has one")
+    if rel not in PRIMARY_EXEMPT:
+        primaries = [c for c in parser.controls if c["primary"] and c["in_main"] and not c["in_form"]]
+        if len(primaries) > 1:
+            labels = ", ".join(repr(c["label"]) for c in primaries)
+            problems.append(f"{rel}: {len(primaries)} primary buttons in main ({labels}); a view has one")
     for control in parser.controls:
         label = control["label"]
         if label in OLD_LABELS or (control["primary"] and label in OLD_PRIMARY_LABELS):
@@ -106,9 +145,11 @@ def check(build_dir: Path) -> list[str]:
     problems = []
     for path in sorted(build_dir.rglob("*.html")):
         rel = path.relative_to(build_dir).as_posix()
-        if rel.startswith(SKIP_PREFIXES) or rel in PENDING_HOME:
+        if rel.startswith(SKIP_PREFIXES):
             continue
-        problems.extend(problems_in(rel, path.read_text(encoding="utf-8", errors="replace")))
+        html = path.read_text(encoding="utf-8", errors="replace")
+        problems.extend(enlist_problems_in(rel, html))
+        problems.extend(problems_in(rel, html))
     return problems
 
 
@@ -122,7 +163,7 @@ def main(argv: list[str]) -> int:
         print(f"::error::{problem}")
     if problems:
         return 1
-    print("check_install_cta: one primary per view, and no old install label")
+    print("check_install_cta: one primary per view, no old install label, and Enlist stays in-page")
     return 0
 
 

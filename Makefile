@@ -93,7 +93,7 @@ include .github/build/Makefile.show-help.mk
 #   test-scripts       Unit tests for the check scripts in .github/scripts/.
 #   workflow-check     actionlint on this repository's workflows.
 #   copilot-pr-handle  Mark a Copilot draft PR ready and approve pending runs
-#                      for its current head (copilot-pr-handler.yml).
+#                      for its current head.
 #   check              site-check, test-scripts and workflow-check.
 #   ci                 setup-ci, then everything site.yml's check job runs.
 #   dmg-check          Sanity-check a disk image: make dmg-check DMG=path/to/file.dmg
@@ -102,6 +102,18 @@ include .github/build/Makefile.show-help.mk
 #                      The steps of publish-dmg.yml (see docs/distribution.md).
 #   npm-fetch, npm-verify, npm-publish, npm-confirm
 #                      The steps of publish-blowhorn-axi.yml (see docs/distribution.md).
+#   product-ci         Run one suite of the private product repo's CI, printing
+#                      only results and failing test ids:
+#                      make product-ci SUITE=python|desktop|rust.
+#   product-ci-log     Download and decrypt a failed suite's encrypted log:
+#                      make product-ci-log RUN=<run id> SUITE=<suite>
+#                      (see docs/distribution.md).
+#   build-dmg-encrypt-log
+#                      Encrypt a failed Mac build's redacted logs for upload
+#                      (build-dmg-mac runs it): make build-dmg-encrypt-log JOB=<job>.
+#   build-dmg-log      Download and decrypt a failed Mac build's encrypted log:
+#                      make build-dmg-log RUN=<run id> JOB=signed|adhoc
+#                      (see docs/distribution.md).
 #   docs-sync          Sync the user docs from a blowhorn checkout
 #                      into content/en/docs/: make docs-sync REF=<tag|branch|sha>
 #                      (see docs/deploy.md).
@@ -123,8 +135,8 @@ ACTIONLINT_VERSION ?= 1.7.7
 BIN_DIR ?= .bin
 # actionlint from PATH when installed; otherwise a pinned copy is downloaded into $(BIN_DIR).
 ACTIONLINT ?= $(shell command -v actionlint 2>/dev/null)
-# Workflows owned by this repo. Template workflows (labeler and friends) are left as-is.
-WORKFLOWS ?= .github/workflows/site.yml .github/workflows/build-site-preview.yml .github/workflows/deploy-site-preview.yml .github/workflows/publish-dmg.yml .github/workflows/sync-docs.yml .github/workflows/cloud-auth-smoke.yml .github/workflows/product-ci.yml .github/workflows/internal-site.yml .github/workflows/internal-site-auto.yml .github/workflows/publish-blowhorn-axi.yml .github/workflows/copilot-pr-handler.yml
+# Every workflow file in this repo. A glob, so adding or deleting a workflow cannot make workflow-check fail with "no such file".
+WORKFLOWS ?= $(sort $(wildcard .github/workflows/*.yml) $(wildcard .github/workflows/*.yaml))
 # A blowhorn checkout for `make docs-sync` (the sync-docs.yml
 # workflow checks the product repo out at this path).
 SOURCE_DIR ?= product
@@ -369,7 +381,7 @@ site-check: check-schemas validate-html check-links check-third-party check-urls
 check-download-links: site-build
 	python3 .github/scripts/check_download_links.py $(BUILD_DIR)
 
-## Production build, then fail if a page shows more than one teal primary in its main content, or an old install label (issue #420). Docs are skipped; the home page is pending its rebuild (#418).
+## Production build, then fail if a page shows more than one teal primary in its main content, or an old install label (issue #420), or if an "Enlist a computer" control is anything but the in-page button (issue #720). Docs are skipped; the home page is exempt from the single-primary limit (PRIMARY_EXEMPT), but not from old install labels or the Enlist rule.
 check-install-cta: site-build
 	python3 .github/scripts/check_install_cta.py $(BUILD_DIR)
 
@@ -445,11 +457,15 @@ test-image-lightbox:
 test-platforms-clip:
 	node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test assets/js/platforms-clip.test.mjs
 
+## Test support intake validation/forwarding and progressive contact fields.
+test-support:
+	node --test signup-worker/worker.test.mjs assets/js/support-form.test.mjs
+
 ## Run the unit tests for the check scripts in .github/scripts/, then the hero activity feed, download page, asset catalog, image lightbox and platforms clip tests.
-test-scripts: test-internal-worker test-activity-feed test-download test-asset-catalog test-image-lightbox test-platforms-clip
+test-scripts: test-internal-worker test-activity-feed test-download test-asset-catalog test-image-lightbox test-platforms-clip test-support
 	python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 
-## Mark a Copilot draft PR ready and approve pending runs for its current head (copilot-pr-handler.yml). Requires GH_TOKEN, GITHUB_REPOSITORY and PR_NUMBER.
+## Mark a Copilot draft PR ready and approve pending runs for its current head. Requires GH_TOKEN, GITHUB_REPOSITORY and PR_NUMBER.
 copilot-pr-handle:
 	@test -n "$(PR_NUMBER)" || { echo "Error: pass PR_NUMBER=<pull request number>."; exit 1; }
 	PR_NUMBER="$(PR_NUMBER)" python3 .github/scripts/copilot_pr_handler.py
@@ -501,14 +517,47 @@ cloud-auth-smoke:
 	  BLOWHORN_PREDATES_CLOUD_FIXES=$$predates "$(ENGINE)/bin/python" .github/scripts/cloud-auth-smoke/drive.py $(CHECK) --engine "$(ENGINE)" --cloud "$(CLOUD_URL)" $(if $(SIGNUP_TAG),--signup-tag $(SIGNUP_TAG)); \
 	fi
 
-## Run the private product repository's CI on a checkout of it, printing only step results and
-## pass/fail counts (its output goes to PRODUCT_CI_LOG, never printed; product-ci.yml runs this):
+## Run the private product repository's CI on a checkout of it, printing only step results,
+## pass/fail counts and failing test ids (its output goes to PRODUCT_CI_LOG, never printed;
+## product-ci.yml runs this).
+## A failed suite's log is also encrypted with age into PRODUCT_CI_ENCRYPTED_DIR, which the
+## workflow uploads (the ciphertext only; read it with product-ci-log):
 ## make product-ci SUITE=python|desktop|rust PRODUCT_DIR=<blowhorn checkout> [PRODUCT_CI_LOG=<file>]
 PRODUCT_DIR ?= product
 PRODUCT_CI_LOG ?= $(or $(RUNNER_TEMP),/tmp)/product-ci/$(SUITE).log
+PRODUCT_CI_ENCRYPTED_DIR ?= $(or $(RUNNER_TEMP),/tmp)/product-ci-encrypted
 product-ci:
 	@test -n "$(SUITE)" || (echo "usage: make product-ci SUITE=python|desktop|rust PRODUCT_DIR=<checkout>"; exit 1)
-	python3 .github/scripts/product-ci/run.py $(SUITE) --product "$(PRODUCT_DIR)" --log "$(PRODUCT_CI_LOG)"
+	python3 .github/scripts/product-ci/run.py $(SUITE) --product "$(PRODUCT_DIR)" --log "$(PRODUCT_CI_LOG)" \
+		--encrypted-dir "$(PRODUCT_CI_ENCRYPTED_DIR)"
+
+## Download a failed Product CI suite's encrypted log and decrypt it into a new temporary directory
+## outside the repository; prints the file's path, never its contents. Needs gh, age and the private key:
+## make product-ci-log RUN=<run id> SUITE=python|desktop|rust [KEY=<age identity file>] [ATTEMPT=<n>]
+CI_LOG_KEY ?= $(HOME)/.config/blowhorn/ci-log.agekey
+product-ci-log:
+	@test -n "$(RUN)" -a -n "$(SUITE)" || (echo "usage: make product-ci-log RUN=<run id> SUITE=python|desktop|rust [KEY=<age identity file>] [ATTEMPT=<n>]"; exit 1)
+	@python3 .github/scripts/encrypted-log/fetch_log.py --kind product-ci --name "$(SUITE)" --run "$(RUN)" \
+		--key "$(or $(KEY),$(CI_LOG_KEY))" $(if $(ATTEMPT),--attempt "$(ATTEMPT)")
+
+## Encrypt a failed Mac build's private logs (RUNNER_TEMP/build-dmg/*.log) with age for build-dmg-mac's upload
+## step, after removing every line that holds a staged signing or diagnostics secret; writes only ciphertext to
+## BUILD_DMG_ENCRYPTED_DIR and prints one fixed line: make build-dmg-encrypt-log JOB=signed|adhoc
+BUILD_DMG_LOG_DIR ?= $(or $(RUNNER_TEMP),/tmp)/build-dmg
+BUILD_DMG_ENCRYPTED_DIR ?= $(or $(RUNNER_TEMP),/tmp)/build-dmg-encrypted
+BUILD_DMG_SECRETS_ROOT ?= $(or $(RUNNER_TEMP),/tmp)
+build-dmg-encrypt-log:
+	@test -n "$(JOB)" || (echo "usage: make build-dmg-encrypt-log JOB=signed|adhoc"; exit 1)
+	@python3 .github/scripts/build-dmg/encrypt_logs.py --job "$(JOB)" --log-dir "$(BUILD_DMG_LOG_DIR)" \
+		--encrypted-dir "$(BUILD_DMG_ENCRYPTED_DIR)" --secrets-root "$(BUILD_DMG_SECRETS_ROOT)"
+
+## Download a failed Build DMG Mac job's encrypted log and decrypt it into a new temporary directory outside the
+## repository; prints the file's path, never its contents. Needs gh, age and the private key:
+## make build-dmg-log RUN=<run id> JOB=signed|adhoc [KEY=<age identity file>] [ATTEMPT=<n>]
+build-dmg-log:
+	@test -n "$(RUN)" -a -n "$(JOB)" || (echo "usage: make build-dmg-log RUN=<run id> JOB=signed|adhoc [KEY=<age identity file>] [ATTEMPT=<n>]"; exit 1)
+	@python3 .github/scripts/encrypted-log/fetch_log.py --kind build-dmg --name "$(JOB)" --run "$(RUN)" \
+		--key "$(or $(KEY),$(CI_LOG_KEY))" $(if $(ATTEMPT),--attempt "$(ATTEMPT)")
 
 ## Sync the user docs from a blowhorn checkout at $(SOURCE_DIR) into $(DOCS_DIR): make docs-sync REF=<tag|branch|sha> (see docs/deploy.md).
 docs-sync:
@@ -646,6 +695,9 @@ clean:
 	cloud-auth-smoke \
 	cloud-auth-smoke-mount \
 	product-ci \
+	product-ci-log \
+	build-dmg-encrypt-log \
+	build-dmg-log \
 	dmg-resolve \
 	dmg-download \
 	dmg-package \

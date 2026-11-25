@@ -18,12 +18,13 @@ drives the Chrome profiles you already use, so without Chrome every browser run
 refuses before it acts.
 
 Blowhorn looks for `/Applications/Google Chrome.app` or
-`~/Applications/Google Chrome.app` on macOS, and for `google-chrome` or
-`google-chrome-stable` on `PATH` or `/opt/google/chrome/chrome` on Linux
-([Linux](#linux)). A path that resolves to Chromium or Chrome for Testing, such
-as a `google-chrome` symlink onto Chromium, does not count as installed; when
-Chrome is missing, every browser-backed command refuses with one sentence
-instead of starting a bundled browser.
+`~/Applications/Google Chrome.app` on macOS, and on Linux for `google-chrome`,
+then `google-chrome-stable`, in every `PATH` directory, then
+`/opt/google/chrome/chrome` ([Linux](#linux)). A candidate that resolves to
+Chromium or Chrome for Testing, such as a `google-chrome` symlink onto
+Chromium, is skipped and the search continues; when no branded Chrome remains,
+every browser-backed command refuses with one sentence instead of starting a
+bundled browser.
 
 The CLI runs on macOS and Linux: the `extension` and `persistent` drivers run on
 both, the `cdp` attach driver is macOS only. The desktop app needs macOS 13 or
@@ -254,6 +255,22 @@ and given as `code` beside `error` in a `--json` answer:
 | `blowhorn-engine-1004` | The Blowhorn extension is turned off or was removed in the mapped Chrome profile. Nothing is opened: turn it on at `chrome://extensions` in that profile, then run again. |
 | `blowhorn-engine-1005` | Chrome opened, but the extension did not connect within the last-resort limit. |
 | `blowhorn-engine-1006` | The native host's announcement does not validate, or arrives cut short or damaged. |
+| `blowhorn-engine-1011` | The person has no Chrome profile mapped on this computer. `chrome open-profile` refuses before it opens anything. |
+| `blowhorn-engine-1012` | The Chrome profile mapped to the person is no longer in Chrome. |
+| `blowhorn-engine-1013` | The mapped Chrome profile's name or signed-in account changed since it was mapped. |
+| `blowhorn-engine-1014` | Chrome's list of profiles could not be read, so the mapping could not be checked. |
+| `blowhorn-engine-1017` | The Blowhorn extension in the mapped Chrome profile did not answer. |
+| `blowhorn-engine-1018` | Several Chrome profiles are mapped to the person and none is chosen for the site. |
+
+Codes 1011 to 1014 and 1018 come with the same sentence a terminal has always shown
+(it names the `blowhorn chrome` command that mends the mapping), and the
+desktop app shows its own words instead of that sentence: for 1011 to 1013
+and 1018, with a button (**Choose a Chrome profile**, **Use this Chrome profile**
+or **Confirm**); for 1014, asking you to open Google Chrome once and try again.
+Codes 1015 and 1016 (you are signed out of Blowhorn; Blowhorn cannot reach its
+store) are given as `code` beside `error` in the `--json` answer of any command
+that needs your Blowhorn account and cannot reach it. For 1015 the desktop app
+offers **Sign in**.
 
 The last-resort limit is 90 seconds. It is a safety net for a Chrome
 that opens but never brings the extension up, not how the run learns it
@@ -320,8 +337,8 @@ signing in, then confirms the session once.
 Whether Google Chrome is installed, whether it is running, and whether
 its debugging switch is on. On macOS the installed path is
 `/Applications/Google Chrome.app`, then `~/Applications/Google Chrome.app`
-(the first one there wins); on Linux the `PATH` names and
-`/opt/google/chrome/chrome`. A missing Chrome stops the run with
+(the first one there wins); on Linux it is the lookup in
+[Requirements](#requirements). A missing Chrome stops the run with
 `ChromeNotInstalled` before any driver starts.
 
 ## Flags
@@ -333,8 +350,8 @@ its debugging switch is on. On macOS the installed path is
 ## Linux
 
 The `extension` and `persistent` drivers run on Linux as on macOS; the
-`cdp` attach driver is macOS only. Chrome is found by its `PATH` names
-and `/opt/google/chrome/chrome`. Everything else on this page reads
+`cdp` attach driver is macOS only. Chrome is found as in
+[Requirements](#requirements). Everything else on this page reads
 the same.
 
 ## A dedicated attach Chrome (no Allow dialog)
@@ -365,7 +382,7 @@ unsupported-flag infobar off.
 | `status` (default) | reads the tree's `Local State`, `DevToolsActivePort` and `SingletonLock`; opens nothing |
 | `signin` | opens the tree with no debugging switch, for the one-time sign-in; quit it after |
 | `start --allow-other-users` | launches Chrome detached with `--remote-debugging-port=0 --remote-debugging-address=127.0.0.1 --disable-blink-features=AutomationControlled --test-type`, then prints the setup steps |
-| `stop` | DevTools `Browser.close`, waits, then `SIGTERM`; signals only the tree's own Chrome, never `SIGKILL` |
+| `stop` | DevTools `Browser.close` (only when the recorded port is proven that Chrome's own loopback port), waits, then `SIGTERM`; signals only a Chrome started on this tree, never `SIGKILL`, and refuses a tree that is a real Chrome's own folder |
 | `install-agent --allow-other-users` | writes and loads `~/Library/LaunchAgents/ai.blowhorn.attach-chrome.plist`, which runs `start` at each login and logs to `data/logs/attach-chrome-agent.*.log` (or `--log-dir`) |
 | `uninstall-agent` | unloads and removes that LaunchAgent; Chrome keeps running |
 
@@ -938,8 +955,12 @@ only), `several` (with the candidates), `none` (with the refusal's
 sentence) or `no-email` - plus `proposed_slug` and `slug_state` (`free`,
 `own`, `taken`, `invalid`) for the profile a confirm would create,
 and `mapped_to` and `mapped_platforms`, the profile the Chrome profile
-is mapped to and the platforms that mapping is chosen for. The
-document's `mappings` lists every mapping on this computer, each with
+is mapped to and the platforms that mapping is chosen for. On a mapped
+Chrome profile, GitHub carries `token_saved` and Bluesky carries
+`app_password_saved`: whether that Blowhorn profile already stores what
+a run needs there (a token; a handle with its app password) for the
+account Chrome shows, the same handle or login in any case. Neither
+secret is ever included. The document's `mappings` lists every mapping on this computer, each with
 its `profile`, `directory`, `platforms`, `identity` and `detail` (the
 sentence a run through it would be refused with, or `null`), including
 one whose Chrome profile is gone (`identity` `missing`): `profiles`
@@ -1010,6 +1031,14 @@ username still becomes the account, and `session` alone writes
 with neither a username nor a session is skipped by name in the notes.
 Slack writes no key - its note says to capture the session with
 `blowhorn profile auth --platform slack <profile>`.
+Bluesky attaches only with its app password and GitHub only with its
+token, each sent in the document or already stored for the profile under
+the same handle or login the assignment writes (in any case, a leading
+`@` ignored). An
+assignment that turns either on with neither is refused before anything
+is written: its result carries `"code": "blowhorn-engine-1022"` and an
+`error` naming the platform, so a handle alone is never kept as a
+connected account. Check the secret first with `blowhorn profile verify`.
 A username omitted from the document is re-read from discovery.
 
 An account is a connection in your Blowhorn account linked to the profile with
@@ -1089,8 +1118,12 @@ written to your Blowhorn account: this only records what the screen
 shows, in `.blowhorn.chrome-not-in-use.json` beside the config file, so
 the next `chrome discover` starts a turned-off account off and an
 account it has never seen on, and the choice survives an app restart.
-It never touches `defaults.exclude`: adding or removing a name there is
-Confirm's, when the choice is confirmed. No store is read, so it works
+It never adds a name to `defaults.exclude`: that is Confirm's, when the
+choice is confirmed. The one change it makes there is tidying: before
+recording, it drops remembered Chrome profiles that Chrome no longer
+lists, and when the last of them was the one Confirm excluded a profile
+for, that name comes off the list; every other name, and its comment,
+stays as you wrote it. No store is read, so it works
 before sign-in. Each assignment answers for itself in `results`, so a
 partial remember is a successful remember: the exit code is 0 when at
 least one assignment landed and 1 when none did. `--dry-run` runs every
@@ -1110,6 +1143,7 @@ can run side by side. See [You're in control](/docs/explanation/youre-in-control
 
 ## Related
 
+- [The Chrome extension, at a glance](/docs/reference/use-the-chrome-extension/) - the side panel and its layout.
 - [You're in control](/docs/explanation/youre-in-control/) - every safety control in one place.
 - [Install the Chrome extension](/docs/how-to/set-up/install-the-chrome-extension/) - install it.
 

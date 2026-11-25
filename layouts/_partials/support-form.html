@@ -1,36 +1,57 @@
-{{- /* Support contact form, posting to Blowhorn's own signup service at
-  api.blowhorn.ai (see signup-worker/, POST /api/support). A plain HTML form
-  with no script: the Worker stores the message and redirects to
-  /support/thanks/. The off-screen field is a honeypot: the Worker answers
-  success for it without storing anything. */ -}}
-{{- $source := "" }}{{ with .RelPermalink }}{{ $source = . }}{{ end -}}
+{{- /* The Worker enforces contact choice too, including with scripts off. */ -}}
+{{- $source := .RelPermalink | default "" -}}
 <form class="support-form" name="support" method="post" action="https://api.blowhorn.ai/api/support">
-              <div class="support-form-pair">
-                <p class="support-form-field">
-                  <label for="support-name">Your name</label>
-                  <input type="text" id="support-name" name="name" autocomplete="name" maxlength="100" required>
-                </p>
-                <p class="support-form-field">
-                  <label for="support-email">Email</label>
-                  <input type="email" id="support-email" name="email" autocomplete="email" maxlength="254" required>
-                </p>
-              </div>
-              <p class="support-form-field">
-                <label for="support-subject">Subject</label>
-                <input type="text" id="support-subject" name="subject" maxlength="199" required>
-              </p>
-              <p class="support-form-field">
-                <label for="support-message">Message</label>
-                <textarea id="support-message" name="message" rows="6" maxlength="5000" required></textarea>
-              </p>
-              <p class="support-form-field">
-                <label for="support-details">What you ran and what it printed <span class="muted">(optional)</span></label>
-                <textarea id="support-details" name="details" rows="4" maxlength="5000" placeholder="Include the exit code and the first words of the error. Leave out credentials, session files and anything from your Chrome profile directories."></textarea>
-              </p>
-              <input type="hidden" name="source_page" value="{{ $source }}">
-              <p class="signup-honeypot" aria-hidden="true">
-                <label for="support-website">Website</label>
-                <input id="support-website" name="website" type="text" tabindex="-1" autocomplete="off">
-              </p>
-              <p class="support-form-actions"><button class="button button-primary" type="submit">Send message</button></p>
+  <p class="support-form-field">
+    <label for="support-reason">What brings you here?</label>
+    <span class="support-select"><select id="support-reason" name="reason">
+      <option value="feedback" selected>Share feedback</option>
+      <option value="issue">Report a problem</option>
+      <option value="product">Ask about the product</option>
+      <option value="pricing">Pricing or licensing</option>
+      <option value="connect">Get in touch</option>
+    </select></span>
+  </p>
+  <p class="support-form-field">
+    <label for="support-message">Your message</label>
+    <textarea id="support-message" name="message" rows="5" maxlength="5000" required placeholder="What would you like us to know?"></textarea>
+  </p>
+  <p class="support-form-field">
+    <label for="support-contact">Would you like a response?</label>
+    <span class="support-select"><select id="support-contact" name="contact_preference" aria-describedby="support-contact-note">
+      <option value="anonymous" selected>No, send anonymously</option>
+      <option value="reply">Yes, respond to me</option>
+    </select></span>
+    <span id="support-contact-note" class="caption muted">Anonymous means no name or email is saved. The service still receives your IP address. Leave identifying details out of your message.</span>
+  </p>
+  <div class="support-form-pair" data-support-contact-fields>
+    <p class="support-form-field">
+      <label for="support-email">Email <span class="muted">(for a response)</span></label>
+      <input type="email" id="support-email" name="email" autocomplete="email" maxlength="254" aria-describedby="support-email-note">
+      <span id="support-email-note" class="caption muted">Required only if you choose a response.</span>
+    </p>
+    <p class="support-form-field">
+      <label for="support-name">Name <span class="muted">(optional)</span></label>
+      <input type="text" id="support-name" name="name" autocomplete="name" maxlength="100">
+    </p>
+  </div>
+  <details class="support-extra">
+    <summary>Add diagnostics <span class="muted">(optional)</span></summary>
+    <div class="support-extra-fields">
+      <p class="support-form-field">
+        <label for="support-details">Error or diagnostic summary</label>
+        <textarea id="support-details" name="details" rows="3" maxlength="5000" placeholder="Blowhorn version, operating system, exit code and the error's first words. No passwords, tokens, cookies or Chrome profile files."></textarea>
+      </p>
+      <p class="support-form-field">
+        <label for="support-diagnostics-reference">Support case or diagnostic report reference</label>
+        <input type="text" id="support-diagnostics-reference" name="diagnostics_reference" maxlength="500" aria-describedby="support-reference-note">
+        <span id="support-reference-note" class="caption muted">Have a case or report reference from the team or the CLI? Add it here. To send a diagnostics package, use the Blowhorn CLI instead: it builds a package you review, then submits it with your report. This form does not upload files.</span>
+      </p>
+    </div>
+  </details>
+  <input type="hidden" name="source_page" value="{{ $source }}">
+  <p class="signup-honeypot" aria-hidden="true">
+    <label for="support-website">Website</label>
+    <input id="support-website" name="website" type="text" tabindex="-1" autocomplete="off">
+  </p>
+  <p class="support-form-actions"><button class="button button-primary" type="submit">Send message</button></p>
 </form>

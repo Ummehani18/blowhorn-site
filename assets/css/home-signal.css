@@ -1297,9 +1297,9 @@ html[data-theme="signal"] #platforms .logo-tile img[src*="github-invertocat-blac
 .posture-figure.is-playing img { visibility: hidden; }
 .posture-radio:checked + .posture-figure { opacity: 1; }
 .posture-radio:focus-visible + .posture-figure { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
-.posture-track { position: relative; height: 2px; margin: var(--space-3) calc(100% / 6) var(--space-2); background: var(--card-muted); border-radius: 999px; }
+.posture-track { position: relative; height: 3px; margin: var(--space-3) calc(100% / 6) var(--space-2); background: linear-gradient(to right, var(--teal-deep), var(--teal) 50%, var(--amber)); border-radius: 999px; }
 .posture-dot { position: absolute; top: 50%; width: 22px; height: 22px; transform: translate(-50%, -50%); cursor: pointer; }
-.posture-dot::before { content: ""; position: absolute; inset: 8px; border-radius: 50%; background: var(--card-muted); }
+.posture-dot::before { content: ""; position: absolute; inset: 7px; border-radius: 50%; background: var(--card-bg); border: 2px solid var(--card-ink); box-shadow: 0 0 0 2px var(--card-bg); }
 .posture-dot:nth-of-type(1) { left: 0; }
 .posture-dot:nth-of-type(2) { left: 50%; }
 .posture-dot:nth-of-type(3) { left: 100%; }

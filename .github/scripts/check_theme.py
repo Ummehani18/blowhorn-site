@@ -23,7 +23,12 @@ matching hash, so JS enhancement cannot leave all four panels stacked.
 No platform-availability "Coming soon" label may return: the catalog, the
 action matrix, the docs platform pages and the docs all-actions table are
 scanned for it (check_platform_labels), and the showcase page's "Where it
-works" section is scanned too. The site's own copy is scanned at the source
+works" section is scanned too. The built home page (and the Reveille preview)
+is scanned for a returned split as well (check_home_soon_split): no "Coming
+soon" group heading, and no "Coming soon" label on a listed platform or right
+beside one. The home page keeps its out-of-scope "coming soon" copy, so it is
+not scanned with the blanket match the platform pages get. The site's own copy
+is scanned at the source
 as well (check_platform_soon_copy): no sentence in content/en/ outside the
 synced docs, or in data/, may name a platform data/integrations.json lists
 and call it coming soon, and no data or front matter record (a table row,
@@ -405,6 +410,71 @@ def check_platform_soon_copy(root: Path) -> list[str]:
     return problems
 
 
+
+# The home page is scanned on its built HTML for a returned Coming soon split.
+# It cannot use check_platform_labels' blanket match: the home page rightly
+# says "coming soon" about team invites and the REST API, which are not
+# platform availability. So it fails only a Coming soon group heading, and a
+# Coming soon label that names a listed platform or sits right beside one.
+HOME_PAGES = ("index.html", "home-reveille/index.html")
+SCRIPT_STYLE_RE = re.compile(r"<(script|style)\b.*?</\1>", re.S | re.I)
+HEADING_RE = re.compile(r"<h([1-6])\b[^>]*>(.*?)</h\1>", re.S | re.I)
+BLOCK_BREAK_RE = re.compile(
+    r"</?(?:p|li|ul|ol|h[1-6]|div|section|article|header|footer|tr|td|th|dd|dt|figcaption|br)\b[^>]*>",
+    re.I,
+)
+
+
+def home_blocks(html: str) -> list[str]:
+    """The built page's copy as a reader sees it, one entry per block."""
+    html = SCRIPT_STYLE_RE.sub("", without_example_placeholders(html))
+    return [b for b in (" ".join(plain_text(b).split()) for b in BLOCK_BREAK_RE.split(html)) if b]
+
+
+def home_soon_problems(rel: str, html: str, names_platform) -> list[str]:
+    problems = []
+    cleaned = SCRIPT_STYLE_RE.sub("", without_example_placeholders(html))
+    for match in HEADING_RE.finditer(cleaned):
+        heading = " ".join(plain_text(match.group(2)).split())
+        if PLATFORM_LABEL_RE.search(heading):
+            problems.append(f"/{rel} has a Coming soon group heading: {heading[:120]!r}")
+    blocks = home_blocks(html)
+    for i, block in enumerate(blocks):
+        if not PLATFORM_LABEL_RE.search(block):
+            continue
+        for sentence in SENTENCE_SPLIT_RE.split(block):
+            if PLATFORM_LABEL_RE.search(sentence) and names_platform(sentence):
+                problems.append(f"/{rel} calls a listed platform coming soon: {sentence.strip()[:120]!r}")
+        if BARE_SOON_RE.fullmatch(block):
+            beside = blocks[max(i - 1, 0):i] + blocks[i + 1:i + 2]
+            for neighbour in beside:
+                if names_platform(neighbour) and not PLATFORM_LABEL_RE.search(neighbour):
+                    problems.append(
+                        f"/{rel} has a Coming soon label beside a listed platform: {neighbour[:120]!r}"
+                    )
+    return problems
+
+
+def check_home_soon_split(build_dir: Path, root: Path) -> list[str]:
+    """Fail a Coming soon split on the built home page: a group heading, or a
+    label on a listed platform. Out-of-scope copy (team invites, the REST API)
+    that names no platform stays allowed."""
+    name_res = [
+        re.compile(rf"(?<![\w-]){re.escape(n)}(?![\w-])") for n in platform_names(root)
+    ]
+
+    def names_platform(text: str) -> bool:
+        return any(rx.search(text) for rx in name_res)
+
+    problems: list[str] = []
+    for rel in HOME_PAGES:
+        path = build_dir / rel
+        if not path.is_file():
+            continue
+        problems.extend(home_soon_problems(rel, path.read_text(encoding="utf-8"), names_platform))
+    return problems
+
+
 NUMBER_WORDS = (
     "two three four five six seven eight nine ten eleven twelve thirteen "
     "fourteen fifteen sixteen"
@@ -632,6 +702,7 @@ def main(root: Path) -> int:
         problems.extend(platforms_default_problems())
 
     problems.extend(check_platform_labels(root, ROOT))
+    problems.extend(check_home_soon_split(root, ROOT))
     problems.extend(check_platform_soon_copy(ROOT))
     problems.extend(check_countable_network_copy(ROOT))
     problems.extend(check_open_network_lists(ROOT))

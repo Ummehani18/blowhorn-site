@@ -1,25 +1,49 @@
 {
   "$schema": "../schemas/posture.schema.json",
-  "label": "Rules of engagement",
+  "label": "Risk Profile",
   "note": "A preview: moving it here changes nothing. Choose yours on the Posture screen in the app.",
   "docs": "/docs/how-to/settings/choose-your-rules-of-engagement",
   "stops": [
     {
       "id": "cautious",
       "name": "Safety on",
-      "subtitle": "slow and careful",
+      "subtitle": "slow and careful · turtle pace",
       "tone": "safe",
       "still": "/assets/brand/cast/major-roe-safety-on.webp",
       "summary": "A quarter of each cap, long gaps between actions, quiet nights and no outreach.",
       "dials": [
-        { "label": "Pace", "value": "Slow" },
-        { "label": "Share of each cap", "value": "25%" },
-        { "label": "Between public actions", "value": "15 to 30 minutes, per profile on each platform" },
-        { "label": "Quiet hours", "value": "22:00 to 07:00" },
-        { "label": "Outreach (follows and invitations)", "value": "Off" },
-        { "label": "After a CAPTCHA or checkpoint", "value": "Holds that platform for 72 hours" },
-        { "label": "Retries", "value": "None" },
-        { "label": "Runs at once", "value": "One at a time" }
+        {
+          "label": "Wait between actions",
+          "value": "15 to 30 minutes, per profile on each platform"
+        },
+        {
+          "label": "Daily volume",
+          "value": "25% of platform cap"
+        },
+        {
+          "label": "Quiet hours",
+          "value": "22:00 to 07:00 (local)"
+        },
+        {
+          "label": "Challenge pause",
+          "value": "Holds that platform for 72 hours"
+        },
+        {
+          "label": "Warmup",
+          "value": "14 days, caps ramping from day one"
+        },
+        {
+          "label": "Pace",
+          "value": "Slow"
+        },
+        {
+          "label": "Outreach (follows and invitations)",
+          "value": "Off"
+        },
+        {
+          "label": "Retries of scheduled jobs",
+          "value": "None"
+        }
       ]
     },
     {
@@ -31,37 +55,90 @@
       "still": "/assets/brand/cast/major-roe-weapons-tight.webp",
       "summary": "The default. Normal pace and half of each cap, with outreach only where it is established.",
       "dials": [
-        { "label": "Pace", "value": "Normal" },
-        { "label": "Share of each cap", "value": "50%" },
-        { "label": "Quiet hours", "value": "None" },
-        { "label": "Outreach (follows and invitations)", "value": "Only on established platforms" },
-        { "label": "After a CAPTCHA or checkpoint", "value": "Holds that platform for 24 hours" },
-        { "label": "Retries", "value": "None" },
-        { "label": "Runs at once", "value": "Profiles on one platform take turns" }
+        {
+          "label": "Wait between actions",
+          "value": "Platform default cadence"
+        },
+        {
+          "label": "Daily volume",
+          "value": "50% of platform cap"
+        },
+        {
+          "label": "Quiet hours",
+          "value": "None"
+        },
+        {
+          "label": "Challenge pause",
+          "value": "Holds that platform for 24 hours"
+        },
+        {
+          "label": "Warmup",
+          "value": "7-day ramp (new profiles run Safety on for 14 days)"
+        },
+        {
+          "label": "Pace",
+          "value": "Normal"
+        },
+        {
+          "label": "Outreach (follows and invitations)",
+          "value": "Only on established platforms"
+        },
+        {
+          "label": "Retries of scheduled jobs",
+          "value": "None"
+        }
       ]
     },
     {
       "id": "brisk",
       "name": "Weapons free",
-      "subtitle": "fast, and more noticeable to the platform",
+      "subtitle": "fast and assertive · rabbit pace",
       "tone": "warn",
       "still": "/assets/brand/cast/major-roe-weapons-free.webp",
       "summary": "The full cap, outreach on and a shorter pause after a challenge. Still never past a platform's published limit.",
       "dials": [
-        { "label": "Pace", "value": "Fast" },
-        { "label": "Share of each cap", "value": "100%" },
-        { "label": "Quiet hours", "value": "None" },
-        { "label": "Outreach (follows and invitations)", "value": "On" },
-        { "label": "After a CAPTCHA or checkpoint", "value": "Holds that platform for 12 hours" },
-        { "label": "Retries", "value": "One, never for a sign-in" },
-        { "label": "Runs at once", "value": "Profiles on one platform may run together" }
+        {
+          "label": "Wait between actions",
+          "value": "Immediate (no added delay)"
+        },
+        {
+          "label": "Daily volume",
+          "value": "100% of platform cap"
+        },
+        {
+          "label": "Quiet hours",
+          "value": "None"
+        },
+        {
+          "label": "Challenge pause",
+          "value": "Holds that platform for 12 hours"
+        },
+        {
+          "label": "Warmup",
+          "value": "3-day ramp (new profiles run Safety on for 14 days)"
+        },
+        {
+          "label": "Pace",
+          "value": "Fast"
+        },
+        {
+          "label": "Outreach (follows and invitations)",
+          "value": "On"
+        },
+        {
+          "label": "Retries of scheduled jobs",
+          "value": "One, never for a sign-in"
+        }
       ]
     }
   ],
   "warmup": "New profiles and new computers run Safety on for their first 14 days, caps ramping up, whatever you choose.",
   "promise": {
-    "title": "A hard cap above every stop",
-    "body": "Blowhorn follows its Field Manual and each platform's best practices. Every cap sits under Blowhorn's own ceiling for that platform, and above everything stands a hard cap from the limits the platform itself publishes. No stop, not even Weapons free, pushes past them and puts your accounts at risk. Your own caps can only lower them, never raise them.",
-    "link": { "label": "Read the Field Manual", "href": "/field-manual" }
+    "title": "Your pace, your risk, your call",
+    "body": "Blowhorn behaves exactly as you set it; nothing about the setting is ours. Every cap sits under Blowhorn's own ceiling for that platform, and above everything stands a hard cap from the limits the platform itself publishes. No stop, not even Weapons free, pushes past them and puts your accounts at risk. Your own caps can only lower them, never raise them.",
+    "link": {
+      "label": "Read the Field Manual",
+      "href": "/field-manual"
+    }
   }
 }

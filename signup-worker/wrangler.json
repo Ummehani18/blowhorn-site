@@ -24,6 +24,6 @@
   "preview_urls": false,
   "workers_dev": false,
   "vars": {
-    "SUPPORT_FORWARD_URL": "https://cloud.layer5.io/api/marketing/forms/blowhorn-support"
+    "SUPPORT_CASES_URL": "https://cloud.layer5.io/api/support/cases"
   }
 }

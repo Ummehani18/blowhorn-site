@@ -35,7 +35,8 @@ schedules it again on the same activity: `Status` becomes `scheduled` and
 and last error are kept. Raising `Max Retries` alone does not (see
 [Schedule a job](/docs/how-to/schedule/schedule-a-job/)). `blowhorn schedule delete`
 removes an activity by number. `blowhorn schedule validate` checks every activity
-against the schema. `blowhorn schedule bootstrap` previews or writes a
+against the schema and names every reason one fails; an activity whose command
+cannot be scheduled is named once, for its command. `blowhorn schedule bootstrap` previews or writes a
 starter set. `blowhorn schedule trigger-now` forces one activity to run
 immediately instead of waiting for the pass. A Risk Profile hold, including
 while a profile is warming up, keeps that run from starting until you confirm
@@ -137,7 +138,7 @@ exactly what they said.
 ## Related
 
 - [Schedule a job](/docs/how-to/schedule/schedule-a-job/) - create, pause, and resume jobs.
-- [The Blowhorn app, screen by screen](/docs/reference/use-the-desktop-app/) - the Routines view of Activity and the popover boards.
+- [The Blowhorn app, screen by screen](/docs/reference/use-the-desktop-app/) - routines in Activity and the popover's NEXT UP board.
 - [Settings and configuration](/docs/reference/configuration/) - the launch-mode default a job inherits.
 - [How scheduling works](/docs/explanation/scheduling/) - passes, leases, and why an activity waited.
 - [CLI reference](/docs/reference/cli/) - the schedule commands.

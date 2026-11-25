@@ -1,0 +1,181 @@
+name: Cut desktop release
+
+# Master-only worker for a published public vX.Y.Z release. Started by
+# release-desktop.yml with --ref master (or by a manual workflow_dispatch
+# from master). This is the run whose github.ref is refs/heads/master, so
+# the macos-dmg-signing environment (restricted to master, no required
+# reviewers) can sign, and the workflow files are the ones on master.
+#
+# Steps: prepare the private product (bump, commit, tag desktop-vVERSION,
+# draft release) with release-mac.mjs --prepare-release; call build-dmg.yml
+# for Linux gates, sign, notarize and verify; attach the DMG to the private
+# and public releases.
+#
+# BLOWHORN_RELEASE_TOKEN (blowhorn-ai org secret, selected for blowhorn and
+# blowhorn-site) is passed only to the prepare checkout/push and the
+# attach-to-private-release steps. Signing secrets stay inside build-dmg.yml's
+# materialize step. BLOWHORN_DIAGNOSTICS_KEY is passed through only so that
+# workflow can stage it for the signed packaging step.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Desktop version (X.Y.Z, no leading v)"
+        required: true
+        type: string
+      site_tag:
+        description: "Public release tag on this repository (vX.Y.Z)"
+        required: true
+        type: string
+      publisher:
+        description: "GitHub login of the person who published the site release"
+        required: false
+        type: string
+        default: ""
+
+run-name: Cut desktop ${{ inputs.site_tag }}
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: cut-desktop-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Require master
+    if: github.ref != 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Refuse a non-master ref
+        run: |
+          echo "cut-desktop-release only runs on master (this ref is $GITHUB_REF). Dispatch with --ref master."
+          exit 1
+
+  prepare:
+    name: Prepare the private release
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      ref: ${{ steps.prepare.outputs.ref }}
+      version: ${{ steps.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate version and site tag
+        env:
+          IN_VERSION: ${{ inputs.version }}
+          IN_SITE_TAG: ${{ inputs.site_tag }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/release-desktop/parse_release.py --tag "$IN_SITE_TAG" --output "$GITHUB_OUTPUT"
+          expected="${IN_SITE_TAG#v}"
+          test "$IN_VERSION" = "$expected" || { echo "version $IN_VERSION does not match site tag $IN_SITE_TAG"; exit 1; }
+
+      - name: Check out the product on master (write token)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: blowhorn-ai/blowhorn
+          ref: master
+          token: ${{ secrets.BLOWHORN_RELEASE_TOKEN }}
+          path: product
+          persist-credentials: true
+          submodules: true
+
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: 11.1.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: product/desktop/pnpm-lock.yaml
+
+      - name: Install desktop dependencies
+        run: pnpm -C product/desktop install --frozen-lockfile
+
+      - name: Bump, tag and draft the private release
+        id: prepare
+        env:
+          GH_TOKEN: ${{ secrets.BLOWHORN_RELEASE_TOKEN }}
+          GH_PROMPT: "never"
+          PUBLISHER: ${{ inputs.publisher }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "BLOWHORN_RELEASE_TOKEN is not available to this job. It is a blowhorn-ai org secret, selected for blowhorn and blowhorn-site, used only to write to blowhorn-ai/blowhorn."
+            exit 2
+          fi
+          if [[ -n "$PUBLISHER" && "$PUBLISHER" =~ ^[A-Za-z0-9-]+$ ]]; then
+            git -C product config user.name "$PUBLISHER"
+            git -C product config user.email "${PUBLISHER}@users.noreply.github.com"
+          else
+            git -C product config user.name "blowhorn-release"
+            git -C product config user.email "blowhorn-release@users.noreply.github.com"
+          fi
+          set +x
+          cd product/desktop
+          output="$(node scripts/release-mac.mjs --prepare-release --version "$VERSION" --yes --skip-checks)"
+          printf '%s\n' "$output"
+          ref="$(printf '%s\n' "$output" | awk '/^prepare-release: ok / { for (i = 1; i <= NF; i++) if ($i ~ /^ref=/) { sub(/^ref=/, "", $i); print $i } }')"
+          [[ "$ref" =~ ^[0-9a-f]{40}$ ]] || { echo "prepare-release did not print a 40-character commit SHA"; exit 1; }
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build and sign the DMG
+    needs: prepare
+    if: github.ref == 'refs/heads/master' && needs.prepare.outputs.ref != ''
+    uses: ./.github/workflows/build-dmg.yml
+    with:
+      ref: ${{ needs.prepare.outputs.ref }}
+      version: ${{ needs.prepare.outputs.version }}
+      mode: developer-id
+    secrets:
+      DMG_SOURCE_TOKEN: ${{ secrets.DMG_SOURCE_TOKEN }}
+      DEVELOPER_ID_P12: ${{ secrets.DEVELOPER_ID_P12 }}
+      DEVELOPER_ID_P12_PASSPHRASE: ${{ secrets.DEVELOPER_ID_P12_PASSPHRASE }}
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      BLOWHORN_DIAGNOSTICS_KEY: ${{ secrets.BLOWHORN_DIAGNOSTICS_KEY }}
+
+  publish:
+    name: Attach the DMG to both releases
+    needs: [prepare, build]
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: blowhorn-desktop-dmg
+          path: dist
+
+      - name: Attach to the private and public releases
+        env:
+          BLOWHORN_RELEASE_TOKEN: ${{ secrets.BLOWHORN_RELEASE_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          SITE_TAG: ${{ inputs.site_tag }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/release-desktop/attach_dmg.py \
+            --dmg "dist/Blowhorn-${VERSION}-universal.dmg" \
+            --manifest dist/build-dmg-manifest.json \
+            --version "$VERSION" \
+            --site-tag "$SITE_TAG"

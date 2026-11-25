@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blowhorn.ai/schemas/build-dmg-dispatch.json",
+  "title": "build-dmg repository_dispatch payload",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_type", "client_payload"],
+  "properties": {
+    "event_type": { "const": "build-dmg" },
+    "client_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "version", "mode"],
+      "properties": {
+        "ref": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$",
+          "description": "Full 40-character product commit SHA, already fetchable (temporary ref or master)."
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$",
+          "description": "Desktop semver as in desktop/package.json, no leading v."
+        },
+        "mode": { "enum": ["adhoc", "developer-id"] }
+      }
+    }
+  }
+}

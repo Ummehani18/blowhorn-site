@@ -67,7 +67,7 @@ jobs:
     steps:
       # Full history so the docs-sync branch starts from the right place.
       # Credentials stay for the push.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: true
@@ -76,7 +76,7 @@ jobs:
       # ever authenticates to GitHub, and nothing here can push to the
       # product repository.
       - name: Check out product repo (read-only)
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: blowhorn-ai/blowhorn
           ref: ${{ env.SYNC_REF }}
@@ -88,7 +88,7 @@ jobs:
       # and parser. Regenerate them at this ref so a page that was not
       # rebuilt before its commit is never published stale. This is a
       # public repository, so these minutes cost nothing.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.14"
 

@@ -40,7 +40,7 @@
     <div class="posture-readout" data-stop="{{ .id }}" data-tone="{{ .tone }}">
       <p class="posture-name"><strong>{{ .name }}</strong>{{ if .default }} <span class="posture-default">Default</span>{{ end }}<br><span class="muted">{{ .subtitle }}</span></p>
       <p class="posture-summary">{{ .summary }}</p>
-      <details class="posture-dials">
+      <details class="posture-dials" open>
         <summary class="ui">Every dial at {{ .name }}</summary>
         <dl>
           {{- range .dials }}

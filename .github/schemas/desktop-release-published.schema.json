@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blowhorn.ai/schemas/desktop-release-published.json",
+  "title": "Published blowhorn-site release that cuts a desktop build",
+  "description": "The public GitHub release tag on blowhorn-ai/blowhorn-site that triggers a desktop cut. It is vX.Y.Z (optional prerelease suffix), the same tag customers download as, not desktop-vX.Y.Z (that tag lives on the private product repository) and not axi-vX.Y.Z (blowhorn-axi).",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["tag_name"],
+  "properties": {
+    "tag_name": {
+      "type": "string",
+      "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$",
+      "description": "Public release tag, for example v2.15.0 or v2.15.0-beta.1."
+    }
+  }
+}

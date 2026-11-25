@@ -1,0 +1,76 @@
+name: Release desktop
+
+# Thin dispatcher. A published GitHub release on this public repository
+# whose tag is vX.Y.Z (see .github/schemas/desktop-release-published.schema.json)
+# starts a desktop cut. The run's github.ref is the tag, not master, so this
+# workflow must not run the signed Mac job or touch BLOWHORN_RELEASE_TOKEN or
+# signing secrets: a crafted tag would otherwise execute untrusted workflow
+# YAML with those credentials. This file only validates the tag, checks the
+# publisher can publish here, and dispatches cut-desktop-release.yml on
+# master, where macos-dmg-signing's master-only policy and the write token
+# apply to master-pinned workflow files.
+#
+# axi-v* releases are skipped (success) so blowhorn-axi publishes do not fail
+# this workflow. Any other tag is rejected.
+#
+# Only collaborators with write, maintain, or admin can publish a release on
+# this repository; the job re-checks that. Yi's call: no required reviewers
+# on macos-dmg-signing; any Firstmate roster member may release.
+
+on:
+  release:
+    types: [published]
+
+run-name: Release desktop ${{ github.event.release.tag_name }}
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: release-desktop-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    name: Validate and dispatch on master
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: master
+          persist-credentials: false
+
+      - name: Classify the published tag
+        id: tag
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/release-desktop/parse_release.py \
+            --tag "$TAG" \
+            --output "$GITHUB_OUTPUT"
+
+      - name: Require a publisher who can publish here
+        if: steps.tag.outputs.decision == 'accept'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_ACTOR: ${{ github.event.release.author.login || github.actor }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python3 .github/scripts/release-desktop/require_maintainer.py
+
+      - name: Dispatch the cut on master
+        if: steps.tag.outputs.decision == 'accept'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/release-desktop/dispatch_cut.py \
+            --version "${{ steps.tag.outputs.version }}" \
+            --site-tag "${{ steps.tag.outputs.tag }}" \
+            --publisher "${{ github.event.release.author.login || github.actor }}"
+
+      - name: Skip a non-desktop release
+        if: steps.tag.outputs.decision == 'skip'
+        run: echo "skipped ${{ steps.tag.outputs.tag }} (not a desktop release)"

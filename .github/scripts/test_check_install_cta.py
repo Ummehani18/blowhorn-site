@@ -5,6 +5,7 @@ from pathlib import Path
 import check_install_cta as check
 
 PRIMARY = '<a class="button button-primary" href="/download/">Download</a>'
+ENLIST = '<button type="button" class="button button-primary" data-enlist hidden>Enlist a computer</button>'
 SECONDARY = '<a class="button button-secondary" href="/download/">Download</a>'
 
 
@@ -56,10 +57,9 @@ class OldLabelTest(unittest.TestCase):
         html = page(outside='<header><a href="/download/">Get Blowhorn</a></header>')
         self.assertIn("'Get Blowhorn'", self.problems(html)[0])
 
-    def test_enlist_a_computer_fails(self):
-        problems = self.problems(page('<a class="button" href="/download/">Enlist a computer</a>'))
-        self.assertEqual(len(problems), 1)
-        self.assertIn("'Enlist a computer'", problems[0])
+    def test_enlist_is_no_longer_an_old_label(self):
+        # The in-page Enlist button is current markup; the Enlist rule has its own tests.
+        self.assertEqual(self.problems(page(ENLIST)), [])
 
     def test_install_the_cli_is_fine_as_a_secondary(self):
         self.assertEqual(self.problems(page('<a class="button button-secondary" href="/docs/">Install the CLI</a>')), [])
@@ -77,6 +77,50 @@ class OldLabelTest(unittest.TestCase):
         self.assertEqual(self.problems(page(PRIMARY + SECONDARY)), [])
 
 
+class EnlistControlTest(unittest.TestCase):
+    """Issue #720: "Enlist a computer" is an in-page button and never navigates."""
+
+    def problems(self, html, rel="index.html"):
+        return check.enlist_problems_in(rel, html)
+
+    def test_the_in_page_button_passes(self):
+        self.assertEqual(self.problems(page(ENLIST)), [])
+
+    def test_the_no_js_download_fallback_passes(self):
+        fallback = '<span data-machines-static><a class="button button-secondary" href="/download/">Download</a></span>'
+        self.assertEqual(self.problems(page(ENLIST + fallback)), [])
+
+    def test_a_link_to_download_fails(self):
+        problems = self.problems(page('<a class="button" href="/download/">Enlist a computer</a>'))
+        self.assertEqual(len(problems), 1)
+        self.assertIn("a reads 'Enlist a computer'", problems[0])
+        self.assertIn("'/download/'", problems[0])
+
+    def test_a_link_to_anywhere_fails(self):
+        self.assertEqual(len(self.problems(page('<a href="/pricing/">Enlist a computer</a>'))), 1)
+
+    def test_a_button_with_an_href_fails(self):
+        html = page('<button type="button" data-enlist href="/download/">Enlist a computer</button>')
+        self.assertEqual(len(self.problems(html)), 1)
+
+    def test_a_button_with_a_bare_href_fails(self):
+        html = page('<button type="button" data-enlist href>Enlist a computer</button>')
+        self.assertEqual(len(self.problems(html)), 1)
+
+    def test_a_button_without_the_enlist_marker_fails(self):
+        self.assertEqual(len(self.problems(page('<button type="button">Enlist a computer</button>'))), 1)
+
+    def test_a_submit_button_fails(self):
+        self.assertEqual(len(self.problems(page('<button type="submit" data-enlist>Enlist a computer</button>'))), 1)
+
+    def test_label_is_whitespace_normalised(self):
+        html = page('<a href="/download/">\n  Enlist   a computer\n</a>')
+        self.assertEqual(len(self.problems(html)), 1)
+
+    def test_other_labels_are_not_enlist_controls(self):
+        self.assertEqual(self.problems(page('<a href="/download/">Download</a>')), [])
+
+
 class CheckTreeTest(unittest.TestCase):
     def run_on(self, files):
         with tempfile.TemporaryDirectory() as tmp:
@@ -87,10 +131,26 @@ class CheckTreeTest(unittest.TestCase):
                 path.write_text(body, encoding="utf-8")
             return check.check(root)
 
-    def test_home_is_exempt_while_pending(self):
-        self.assertEqual(self.run_on({"index.html": page(PRIMARY + PRIMARY + '<a href="/x/">Enlist a computer</a>')}), [])
+    def test_home_allows_multiple_primaries_but_checks_labels(self):
+        self.assertEqual(self.run_on({"index.html": page(PRIMARY + PRIMARY + ENLIST)}), [])
+        problems = self.run_on({"index.html": page(PRIMARY + '<a href="/download/">Download free</a>')})
+        self.assertEqual(len(problems), 1)
+        self.assertIn("Download free", problems[0])
 
-    def test_home_reveille_preview_is_exempt_while_pending(self):
+    def test_home_is_covered_by_the_enlist_rule(self):
+        problems = self.run_on({"index.html": page(PRIMARY + '<a class="button" href="/download/">Enlist a computer</a>')})
+        self.assertEqual(len(problems), 1)
+        self.assertTrue(problems[0].startswith("index.html:"))
+        self.assertIn("never navigates", problems[0])
+
+    def test_home_reveille_preview_is_covered_by_the_enlist_rule(self):
+        problems = self.run_on({"home-reveille/index.html": page('<a href="/download/">Enlist a computer</a>')})
+        self.assertEqual(len(problems), 1)
+
+    def test_docs_pages_skip_the_enlist_rule(self):
+        self.assertEqual(self.run_on({"docs/x/index.html": page('<a href="/download/">Enlist a computer</a>')}), [])
+
+    def test_home_reveille_preview_allows_multiple_primaries(self):
         self.assertEqual(self.run_on({"home-reveille/index.html": page(PRIMARY + PRIMARY)}), [])
 
     def test_docs_pages_are_skipped(self):

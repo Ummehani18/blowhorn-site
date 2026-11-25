@@ -1,0 +1,43 @@
+name: checkout-product
+description: Sparse, read-only checkout of one product commit. The token stays in this action.
+inputs:
+  ref:
+    required: true
+  token:
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Check out the product commit (sparse, read-only)
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      with:
+        repository: blowhorn-ai/blowhorn
+        ref: ${{ inputs.ref }}
+        token: ${{ inputs.token }}
+        path: product
+        persist-credentials: false
+        submodules: true
+        filter: blob:none
+        sparse-checkout-cone-mode: false
+        sparse-checkout: |
+          /*
+          !/release/signing/
+          !/release/signing/**
+          !/data/profiles/
+          !/data/profiles/**
+          !/marketing/gtm/
+          !/marketing/gtm/**
+          !/marketing/walkthrough/
+          !/marketing/walkthrough/**
+          !/marketing/strategy/
+          !/marketing/strategy/**
+          !/marketing/capability-comparison/
+          !/marketing/capability-comparison/**
+          !/data/analytics/
+          !/data/analytics/**
+          !/internal/
+          !/internal/**
+
+    - name: Refuse a checkout that materialized internal paths
+      shell: bash
+      run: python3 .github/scripts/build-dmg/checkout_guard.py product

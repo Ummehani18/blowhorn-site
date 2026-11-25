@@ -56,11 +56,148 @@ Pages hosts only the marketing site and small static files.
   `https://github.com/blowhorn-ai/blowhorn-site/releases/download/v1.0.0/Blowhorn-1.0.0-mac-universal.dmg`
 - Releases are never overwritten. Ship a new patch version instead.
 
+## Building the desktop DMG
+
+The signed disk image is built on this repository's free `macos-latest` runner
+by `.github/workflows/build-dmg.yml`, not on a maintainer's Mac.
+
+**Preferred entry:** publish a public GitHub release on this repository whose
+tag is `vX.Y.Z` (optional prerelease suffix, schema:
+`.github/schemas/desktop-release-published.schema.json`). That fires
+`release-desktop.yml`, which only validates the tag and the publisher, then
+dispatches `cut-desktop-release.yml` with `--ref master`. The master run
+bumps and tags `desktop-vX.Y.Z` in the private product repository, calls
+`build-dmg.yml` for Linux gates and the signed DMG, and attaches the image
+to both the private `desktop-vX.Y.Z` release and this public `vX.Y.Z`
+release. `axi-v*` publishes are skipped; any other tag is rejected.
+
+The published-release run's `github.ref` is the tag, not `master`, so
+`release-desktop.yml` does not run the signed job and does not see
+`BLOWHORN_RELEASE_TOKEN` or the signing secrets. Those stay on the
+master-pinned `cut-desktop-release.yml` run, which is what
+`macos-dmg-signing`'s master-only policy applies to.
+`BLOWHORN_RELEASE_TOKEN` is a blowhorn-ai organization secret, selected
+for the `blowhorn` and `blowhorn-site` repositories, and is passed only
+to the steps that push to the private product repository (the product
+checkout and the private release attach).
+
+`make release` in the product repository can still bump, tag and dispatch
+`build-dmg.yml` from a laptop (the previous default). `make release LOCAL_SIGN=1`
+remains the local sign and notarize fallback. `make release-request VERSION=X.Y.Z`
+creates and publishes the public `vX.Y.Z` release, which is enough to start
+the preferred path.
+
+**Triggers for `build-dmg.yml`:** `workflow_dispatch`, `repository_dispatch`
+with event type `build-dmg`, and `workflow_call` from
+`cut-desktop-release.yml`. The workflow does not run on `pull_request` or
+`push`. Linux gates (`product-ci.yml`) run first on `ubuntu-latest`, then
+the Mac job builds the image.
+
+**Modes:** `adhoc` is an unsigned timing build. `developer-id` signs, notarizes
+and staples. A signed run is allowed only when the product commit is the one
+named by `desktop-vVERSION` or `refs/releases/desktop-vVERSION`.
+
+**Environment:** signed jobs use the `macos-dmg-signing` environment, which is
+restricted to this repository's `master` branch (a custom policy, because
+`master` is not a protected branch). Pull requests, forks and other branches
+cannot reach it. There are no required reviewers: a signed run on `master`
+proceeds without an approval. That is Yi Nuo's call: any team member listed
+in the Firstmate roster can initiate a release on their own recognizance.
+Signing secret values are blowhorn-ai organization secrets, selected for
+the `blowhorn` and `blowhorn-site` repositories: `DEVELOPER_ID_P12`,
+`DEVELOPER_ID_P12_PASSPHRASE`, `APPLE_API_KEY`, `APPLE_TEAM_ID`,
+`APPLE_API_KEY_ID`, and `APPLE_API_ISSUER`. They resolve in the
+`macos-dmg-signing` environment job even though that environment has no
+environment-scoped secrets. The workflow does not load keys from the
+private product repository. The #2759 rotation was canceled; the existing
+keys were moved unrotated to those org secrets.
+`BLOWHORN_DIAGNOSTICS_KEY` is a `blowhorn-site` repository secret. The
+signed job passes it only to the staging step (not as job-level env, not
+as an input to `build-dmg-mac`, and never on the adhoc job or on pull
+requests). That step writes the key under `RUNNER_TEMP`; the packaging
+step loads the file so rustup, setup-node and pnpm do not inherit it.
+A signed release fails if the key is missing, because the app could not
+send support cases or failure reports.
+
+**Artifacts:** the only uploads are the DMG and its sha256 manifest, retained for
+1 day, and, when a Linux gate or a Mac job fails, that job's log as `age`
+ciphertext (below), retained for 3 days. The Mac build's full log stays under
+`RUNNER_TEMP` and is never printed, cached or uploaded as plaintext. The public log shows only
+fixed phase labels with UTC start and end times (keychain import is limited
+to 5 minutes, the build to 100 minutes, inside the 120-minute job), release
+phase names, and the notarization submission id and status. Private source
+is checked out sparsely, with internal paths excluded. The Mac job caches
+the Cargo registry and git sources, keyed on `Cargo.lock` and the exact
+`rustc` version, and does not cache `engine/rust/target`.
+
+### Reading a failed Product CI log
+
+The Linux gates (`product-ci.yml`, run on its own or by `build-dmg.yml`) print
+only step results, counts and failing test ids, because this repository's logs
+are public. When a suite fails, `.github/scripts/product-ci/run.py` encrypts
+its full log with [age](https://age-encryption.org) to the public recipient
+`LOG_RECIPIENT` in `.github/scripts/encrypted-log/encrypted_log.py`, and the job uploads only the ciphertext as the
+artifact `product-ci-<suite>-log-attempt<n>`, kept 3 days. The public log says
+so in one line (`Encrypted log: available as artifact ...`). A passing suite
+uploads nothing, and a runner without `age` says so and uploads nothing.
+
+The private key is never in a repository, a secret or a runner; a maintainer
+who holds it reads a log with:
+
+```bash
+make product-ci-log RUN=<run id> SUITE=python   # KEY=<identity file>, default ~/.config/blowhorn/ci-log.agekey
+```
+
+The target downloads the artifact (the latest attempt, or `ATTEMPT=<n>`) with
+`gh run download` into a new temporary directory outside the repository,
+decrypts it there, deletes the ciphertext and prints the plaintext file's path,
+never its contents. The log holds private product code: read it locally, never
+paste it into an issue, pull request or chat, and delete the directory when done.
+
+### Reading a failed Build DMG log
+
+The Mac jobs (`Mac signed build`, `Mac adhoc build`) print only fixed phase
+labels and the failed sub-step's public name, such as `build: failed step:
+electron-builder (exit 1)`. Each phase that runs product code writes its whole
+output to a private log under `RUNNER_TEMP/build-dmg/`: `install.log` (the
+desktop package install), `import.log` (the signing keychain import, signed
+job only) and `build.log` (preflight, the build, packaging, signing,
+notarization and the DMG verify). When any step of the job fails,
+`make build-dmg-encrypt-log` (`.github/scripts/build-dmg/encrypt_logs.py`)
+joins the logs that exist, each under a `===== <name> =====` header, and
+encrypts them to the same `LOG_RECIPIENT`. The job uploads only that ciphertext
+as `build-dmg-<signed|adhoc>-log-attempt<n>`, kept 3 days. A passing job
+uploads nothing, and without `age` (installed with Homebrew at the start of
+each Mac job, optional) or when encryption fails, the job prints
+`Encrypted log: none (<reason>).` and uploads nothing.
+
+What the log can contain: the product's build output (source paths, test
+names and failures, compiler, pnpm, electron-builder, codesign, notarytool and
+`hdiutil` output), the commands the build runs with their arguments, file
+paths under `RUNNER_TEMP`, and Apple's public identifiers (team id, App Store
+Connect key id and issuer), which signed binaries and notarization logs carry
+anyway. It never holds key material. The build does not print any: the
+keychain import passes the p12 passphrase only as an argument to `security`,
+`release-mac.mjs` logs the notarytool command with the `.p8` key's path, never
+its contents, and the diagnostics key hook says only that it wrote the key. As
+a second guard, before encrypting, every line holding the value of a secret the
+signed job staged (the p12 passphrase, the `.p8` key, the temporary keychain's
+password, the diagnostics key, and the p12 in its base64 forms) is replaced
+with a fixed marker, and the public log says how many lines were removed. A
+staged secret shorter than 8 characters cannot be matched safely, so the job
+uploads nothing rather than guess.
+
+A key holder reads it the same way:
+
+```bash
+make build-dmg-log RUN=<run id> JOB=adhoc   # or JOB=signed; KEY=<identity file>, ATTEMPT=<n>
+```
+
 ## Publishing a DMG
 
 The DMG must already be built, signed with a Developer ID certificate, notarized,
-and stapled before it reaches this repo. That happens in the product repo's
-build pipeline. The workflow enforces it: **a public release (`draft=false`)
+and stapled before it is published (see [Building the desktop DMG](#building-the-desktop-dmg)).
+The publish workflow enforces it: **a public release (`draft=false`)
 must have `require_notarized=true`**, which runs `codesign`, `spctl` and
 `stapler validate` on a macOS runner and refuses to publish on failure. Only a
 draft may skip verification, so an unverified image can be reviewed but never

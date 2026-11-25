@@ -1,0 +1,271 @@
+name: build-dmg-mac
+description: Build the DMG from an already-sparse product checkout and stage the artifact. Private output stays under RUNNER_TEMP; a failure uploads it only as redacted age ciphertext.
+inputs:
+  ref:
+    required: true
+  version:
+    required: true
+  mode:
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Require a product checkout
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [[ ! -d product ]]; then
+          echo "product checkout is missing; the job must run checkout-product first"
+          exit 1
+        fi
+        python3 .github/scripts/build-dmg/checkout_guard.py product
+
+    - name: Set up Python 3.14
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      with:
+        python-version: "3.14"
+
+    - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      with:
+        version: 11.1.1
+
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      with:
+        node-version: 22
+
+    - name: Install the product's pinned Rust toolchain and both macOS targets
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "build-dmg: [$(date -u +%Y-%m-%dT%H:%M:%SZ)] toolchain: start"
+        if ! command -v rustup >/dev/null 2>&1; then
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+        fi
+        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        # rustup may already be on PATH after the echo above in later steps only.
+        export PATH="$HOME/.cargo/bin:$PATH"
+        test -f product/engine/rust/rust-toolchain.toml
+        # The pin is product/engine/rust/rust-toolchain.toml; never a second copy here.
+        # target add runs in that directory so rustup attaches the macOS
+        # targets to the pin, not to whatever default toolchain the runner has.
+        (cd product/engine/rust && rustup toolchain install && rustup target add aarch64-apple-darwin x86_64-apple-darwin)
+        toolchain="$(cd product/engine/rust && rustc --version)"
+        echo "RUST_TOOLCHAIN_ID=${toolchain// /-}" >> "$GITHUB_ENV"
+        echo "build-dmg: [$(date -u +%Y-%m-%dT%H:%M:%SZ)] toolchain: end ($toolchain)"
+
+    # Registry and git sources only, keyed on the lockfile and the exact
+    # toolchain. The target directory is not cached: with
+    # BLOWHORN_BUILD_CLEANUP=1 the product deletes engine/rust/target after the
+    # engine phase to fit the 14 GB macos-latest disk, so a target cache would
+    # save nothing and restoring it would eat that disk.
+    - name: Cache cargo registry and git sources
+      uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+        key: build-dmg-cargo-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_TOOLCHAIN_ID }}-${{ hashFiles('product/engine/rust/Cargo.lock') }}
+        restore-keys: |
+          build-dmg-cargo-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_TOOLCHAIN_ID }}-
+
+    # release-mac.mjs imports ./e2e/schemas.mjs, which needs ajv from
+    # desktop/node_modules before it can start, so the build exited 1 at
+    # once without this (run 45528604331). Same install as the Chrome Web
+    # Store workflow: the checked-out ref's own lockfile, lifecycle scripts
+    # skipped, and before any signing material is in the environment.
+    - name: Install the desktop package
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p "$RUNNER_TEMP/build-dmg"
+        cd product/desktop
+        if ! python3 ../../.github/scripts/build-dmg/timed_run.py \
+          --label "desktop install" \
+          --timeout-minutes 10 \
+          --log "$RUNNER_TEMP/build-dmg/install.log" \
+          -- pnpm install --frozen-lockfile --ignore-scripts; then
+          echo "pnpm install in product/desktop failed. Run it in a local checkout of the same ref to see why."
+          exit 1
+        fi
+
+    - name: Import the temporary signing keychain
+      if: inputs.mode == 'developer-id'
+      shell: bash
+      run: |
+        set +x
+        set -euo pipefail
+        # Signing files are written by the job's materialize step, which is the
+        # only step that receives the raw environment secrets. env.sh is sourced
+        # here instead of via GITHUB_ENV so rustup and setup-* never see the
+        # Apple identifiers or signing paths.
+        if [[ ! -f "$RUNNER_TEMP/blowhorn-signing/env.sh" ]]; then
+          echo "signing material is missing; the job must run materialize_signing.sh first"
+          exit 1
+        fi
+        # shellcheck disable=SC1091
+        source "$RUNNER_TEMP/blowhorn-signing/env.sh"
+        mkdir -p "$RUNNER_TEMP/build-dmg"
+        # A healthy import takes seconds. The limit turns a hang (as in run
+        # 45483241102, which sat here for its whole 120-minute job) into a
+        # clear failure within minutes.
+        if ! python3 .github/scripts/build-dmg/timed_run.py \
+          --label "keychain import" \
+          --timeout-minutes 5 \
+          --log "$RUNNER_TEMP/build-dmg/import.log" \
+          -- product/desktop/scripts/ci-import-signing-keychain.sh \
+          --p12 "$SIGNING_P12" \
+          --passphrase-file "$SIGNING_PASSPHRASE_FILE" \
+          --p8 "$SIGNING_P8" \
+          --keychain "$SIGNING_KEYCHAIN" \
+          --password-file "$SIGNING_KEYCHAIN_PASSWORD_FILE"; then
+          echo "signing keychain import failed. Run ci-import-signing-keychain.sh in a local checkout to see why."
+          exit 1
+        fi
+        echo "temporary signing keychain: ready"
+
+    - name: Build, sign, notarize and verify (output withheld)
+      shell: bash
+      env:
+        BLOWHORN_BUILD_CLEANUP: "1"
+        BUILD_VERSION: ${{ inputs.version }}
+        BUILD_MODE: ${{ inputs.mode }}
+      run: |
+        set +x
+        set -euo pipefail
+        if [[ "$BUILD_MODE" == "developer-id" ]]; then
+          if [[ ! -f "$RUNNER_TEMP/blowhorn-signing/env.sh" ]]; then
+            echo "signing material is missing; the job must run materialize_signing.sh first"
+            exit 1
+          fi
+          # shellcheck disable=SC1091
+          source "$RUNNER_TEMP/blowhorn-signing/env.sh"
+          keyfile="$RUNNER_TEMP/blowhorn-diagnostics/key"
+          if [[ ! -s "$keyfile" ]]; then
+            echo "BLOWHORN_DIAGNOSTICS_KEY is not staged; a signed release cannot send support cases."
+            exit 1
+          fi
+          # Load from the staging file; do not print. set +x is already on.
+          BLOWHORN_DIAGNOSTICS_KEY="$(python3 -c 'import pathlib, os, sys; sys.stdout.write(pathlib.Path(os.environ["RUNNER_TEMP"], "blowhorn-diagnostics", "key").read_text().strip())')"
+          export BLOWHORN_DIAGNOSTICS_KEY
+          if [[ -z "$BLOWHORN_DIAGNOSTICS_KEY" ]]; then
+            echo "BLOWHORN_DIAGNOSTICS_KEY is empty; a signed release cannot send support cases."
+            exit 1
+          fi
+        fi
+        # 100 minutes leaves the 120-minute job room for setup, staging and
+        # keychain teardown, so a hung build reports its last phase instead of
+        # being cut off by the job timeout.
+        python3 .github/scripts/build-dmg/run_build.py \
+          --product product \
+          --log "$RUNNER_TEMP/build-dmg/build.log" \
+          --version "$BUILD_VERSION" \
+          --mode "$BUILD_MODE" \
+          --timeout-minutes 100
+
+    - name: Stage the DMG and the manifest
+      shell: bash
+      env:
+        EXPECT_REF: ${{ inputs.ref }}
+        EXPECT_VERSION: ${{ inputs.version }}
+        EXPECT_MODE: ${{ inputs.mode }}
+      run: |
+        set -euo pipefail
+        mkdir -p dist
+        python3 - <<'PY'
+        import hashlib, os, shutil, sys
+        from pathlib import Path
+        sys.path.insert(0, ".github/scripts/build-dmg")
+        from manifest import parse_manifest
+        src = Path("product/desktop/release-prod")
+        manifest = parse_manifest((src / "build-dmg-manifest.json").read_text())
+        if manifest["ref"] != os.environ["EXPECT_REF"]:
+            raise SystemExit("manifest ref does not match the requested commit")
+        if manifest["version"] != os.environ["EXPECT_VERSION"]:
+            raise SystemExit("manifest version does not match the requested version")
+        if manifest["signing_mode"] != os.environ["EXPECT_MODE"]:
+            raise SystemExit("manifest signing_mode does not match the requested mode")
+        dmg = src / manifest["dmg_name"]
+        if not dmg.is_file():
+            raise SystemExit("built DMG is missing from the product checkout")
+        digest = hashlib.sha256(dmg.read_bytes()).hexdigest()
+        if digest != manifest["sha256"]:
+            raise SystemExit("sha256 of the staged DMG does not match the manifest")
+        if dmg.stat().st_size != manifest["size_bytes"]:
+            raise SystemExit("size of the staged DMG does not match the manifest")
+        dest = Path("dist")
+        shutil.copy2(dmg, dest / manifest["dmg_name"])
+        shutil.copy2(src / "build-dmg-manifest.json", dest / "build-dmg-manifest.json")
+        print(f"staged {manifest['dmg_name']} ({manifest['size_bytes']} bytes)")
+        PY
+
+    - name: Upload the DMG artifact
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: blowhorn-desktop-dmg
+        path: |
+          dist/Blowhorn-*-universal.dmg
+          dist/build-dmg-manifest.json
+        if-no-files-found: error
+        retention-days: 1
+        compression-level: 0
+
+    # On any failure above (install, keychain import, preflight, build,
+    # package, verify, staging): join the private logs under
+    # RUNNER_TEMP/build-dmg, drop every line holding a staged secret's value,
+    # and encrypt the rest with age into RUNNER_TEMP/build-dmg-encrypted, which
+    # then holds age ciphertext or nothing (encrypt_logs.py). Runs before the
+    # teardown below deletes the staged secrets the redaction matches against.
+    - name: Encrypt the failed build's log (ciphertext only)
+      if: failure()
+      shell: bash
+      env:
+        BUILD_DMG_JOB: ${{ inputs.mode == 'developer-id' && 'signed' || 'adhoc' }}
+      run: make build-dmg-encrypt-log JOB="$BUILD_DMG_JOB"
+
+    # The age ciphertext of the failed build's log, nothing else.
+    - name: Upload the encrypted log (failed build only)
+      if: failure()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: build-dmg-${{ inputs.mode == 'developer-id' && 'signed' || 'adhoc' }}-log-attempt${{ github.run_attempt }}
+        path: ${{ runner.temp }}/build-dmg-encrypted/*.age
+        retention-days: 3
+        if-no-files-found: ignore
+        compression-level: 0
+
+    - name: Delete the temporary signing keychain
+      if: always() && inputs.mode == 'developer-id'
+      shell: bash
+      run: |
+        set +x
+        set -uo pipefail
+        status=0
+        if [[ -f "${RUNNER_TEMP:-}/blowhorn-signing/env.sh" ]]; then
+          # shellcheck disable=SC1091
+          source "$RUNNER_TEMP/blowhorn-signing/env.sh"
+        fi
+        mkdir -p "${RUNNER_TEMP:-/tmp}/build-dmg"
+        if [[ -n "${SIGNING_KEYCHAIN:-}" && -x product/desktop/scripts/ci-teardown-signing-keychain.sh ]]; then
+          product/desktop/scripts/ci-teardown-signing-keychain.sh \
+            --keychain "${SIGNING_KEYCHAIN:-}" \
+            --password-file "${SIGNING_KEYCHAIN_PASSWORD_FILE:-}" \
+            --p12 "${SIGNING_P12:-}" \
+            --p8 "${SIGNING_P8:-}" \
+            --passphrase-file "${SIGNING_PASSPHRASE_FILE:-}" \
+            >"${RUNNER_TEMP:-/tmp}/build-dmg/teardown.log" 2>&1 \
+            || status=$?
+        fi
+        if [[ -n "${SIGNING_KEYCHAIN:-}" ]]; then
+          security delete-keychain "$SIGNING_KEYCHAIN" 2>/dev/null || true
+        fi
+        if [[ -n "${RUNNER_TEMP:-}" && -d "$RUNNER_TEMP/blowhorn-signing" ]]; then
+          rm -rf "$RUNNER_TEMP/blowhorn-signing" || status=1
+        fi
+        if [[ -n "${RUNNER_TEMP:-}" && -d "$RUNNER_TEMP/blowhorn-diagnostics" ]]; then
+          rm -rf "$RUNNER_TEMP/blowhorn-diagnostics" || status=1
+        fi
+        if [[ "$status" -ne 0 ]]; then
+          echo "signing teardown reported a failure; the temporary directory has been removed"
+          exit "$status"
+        fi

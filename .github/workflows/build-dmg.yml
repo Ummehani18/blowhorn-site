@@ -1,0 +1,250 @@
+name: Build DMG
+
+# Builds, signs, notarizes and verifies the private product's desktop DMG on
+# this public repository's free macos-latest runner (#2558, #2624).
+#
+# Triggers: workflow_dispatch, repository_dispatch (event type build-dmg),
+# and workflow_call from cut-desktop-release.yml (which is itself started
+# on master). Never pull_request or push. Linux gates (product-ci.yml) run
+# first on ubuntu-latest, then the Mac job. A release-published run's ref
+# is the tag, so this workflow is never called directly from that run:
+# cut-desktop-release.yml is dispatched with --ref master first, and that
+# master run is what calls this file, so macos-dmg-signing's master-only
+# policy applies to master-pinned workflow code.
+#
+# developer-id runs use the macos-dmg-signing environment, which is restricted
+# to this repository's master branch (custom policy: master is not a protected
+# branch, so protected_branches would block every deploy). Pull requests,
+# forks and other branches cannot reach it. There are no required reviewers:
+# a signed run on master proceeds without an approval. Signing secrets are
+# blowhorn-ai organization secrets, selected for the blowhorn and
+# blowhorn-site repositories, with these exact names: DEVELOPER_ID_P12,
+# DEVELOPER_ID_P12_PASSPHRASE, APPLE_API_KEY, APPLE_TEAM_ID, APPLE_API_KEY_ID,
+# APPLE_API_ISSUER. They resolve in this environment job even though the
+# environment has no environment-scoped secrets. This workflow does not load
+# keys from the private product repository. The #2759 rotation was canceled;
+# the existing keys were moved unrotated to those org secrets. If a required
+# secret is missing, the materialize step fails with a fixed "not configured"
+# message.
+# Signing secrets are passed only to the materialize step, never as job-level
+# env, so setup, rustup and the product build do not inherit the raw p12.
+# DMG_SOURCE_TOKEN is passed only to checkout-product (and to validate's
+# require_signed_ref step for developer-id), never as an input to
+# build-dmg-mac, so rustup, setup-node, pnpm and the upload step do not
+# inherit INPUT_PRODUCT_TOKEN.
+# BLOWHORN_DIAGNOSTICS_KEY is a blowhorn-site repository secret. It is
+# passed only to the signed job's staging step (not as job-level env, not
+# as an input to build-dmg-mac, and never on the adhoc job or on pull
+# requests), then loaded from a RUNNER_TEMP file in the packaging step so
+# rustup, setup-node and pnpm do not inherit it.
+# A developer-id ref must be the commit named by product tag desktop-vVERSION
+# or refs/releases/desktop-vVERSION (the refs make release pushes first).
+#
+# Private source is checked out sparsely (release/signing/ and other internal
+# paths excluded). Logs never print or cache private output, and never upload
+# it as plaintext. The artifacts are the DMG plus its sha256 manifest, retained
+# for 1 day, and, only when a Mac job fails, its private build logs as age
+# ciphertext to the public recipient in encrypted-log/encrypted_log.py, with
+# every line holding a staged secret removed first (build-dmg/encrypt_logs.py),
+# retained for 3 days as build-dmg-<signed|adhoc>-log-attempt<n>. The private
+# key is in no repository, secret or runner; `make build-dmg-log RUN=<run id>
+# JOB=<job>` reads it for a key holder.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Product commit (full 40-character SHA)"
+        required: true
+        type: string
+      version:
+        description: "Desktop version (X.Y.Z, no leading v)"
+        required: true
+        type: string
+      mode:
+        description: "adhoc (unsigned timing) or developer-id (signed and notarized)"
+        required: true
+        type: choice
+        options:
+          - adhoc
+          - developer-id
+  repository_dispatch:
+    types:
+      - build-dmg
+  workflow_call:
+    inputs:
+      ref:
+        description: "Product commit (full 40-character SHA)"
+        required: true
+        type: string
+      version:
+        description: "Desktop version (X.Y.Z, no leading v)"
+        required: true
+        type: string
+      mode:
+        description: "adhoc or developer-id"
+        required: true
+        type: string
+    secrets:
+      DMG_SOURCE_TOKEN:
+        required: true
+      DEVELOPER_ID_P12:
+        required: false
+      DEVELOPER_ID_P12_PASSPHRASE:
+        required: false
+      APPLE_API_KEY:
+        required: false
+      APPLE_TEAM_ID:
+        required: false
+      APPLE_API_KEY_ID:
+        required: false
+      APPLE_API_ISSUER:
+        required: false
+      BLOWHORN_DIAGNOSTICS_KEY:
+        required: false
+
+run-name: Build DMG ${{ inputs.version || github.event.client_payload.version }} ${{ inputs.ref || github.event.client_payload.ref }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-dmg-${{ inputs.ref || github.event.client_payload.ref }}-${{ inputs.mode || github.event.client_payload.mode }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate payload
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      ref: ${{ steps.resolve.outputs.ref }}
+      version: ${{ steps.resolve.outputs.version }}
+      mode: ${{ steps.resolve.outputs.mode }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate ref, version and mode
+        id: resolve
+        env:
+          IN_REF: ${{ inputs.ref || github.event.client_payload.ref }}
+          IN_VERSION: ${{ inputs.version || github.event.client_payload.version }}
+          IN_MODE: ${{ inputs.mode || github.event.client_payload.mode }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, sys
+          sys.path.insert(0, ".github/scripts/build-dmg")
+          from payload import parse_inputs
+          parsed = parse_inputs(os.environ["IN_REF"], os.environ["IN_VERSION"], os.environ["IN_MODE"])
+          payload = parsed["client_payload"]
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"ref={payload['ref']}\n")
+              out.write(f"version={payload['version']}\n")
+              out.write(f"mode={payload['mode']}\n")
+          print(f"payload: ok {payload['mode']} {payload['version']}")
+          PY
+
+      - name: Require a product release ref for signed builds
+        if: steps.resolve.outputs.mode == 'developer-id'
+        env:
+          GH_TOKEN: ${{ secrets.DMG_SOURCE_TOKEN }}
+          IN_REF: ${{ steps.resolve.outputs.ref }}
+          IN_VERSION: ${{ steps.resolve.outputs.version }}
+        run: python3 .github/scripts/build-dmg/require_signed_ref.py
+
+  linux-green:
+    name: Linux gates
+    needs: validate
+    uses: ./.github/workflows/product-ci.yml
+    with:
+      ref: ${{ needs.validate.outputs.ref }}
+      caller: build-dmg
+    secrets:
+      DMG_SOURCE_TOKEN: ${{ secrets.DMG_SOURCE_TOKEN }}
+
+  build-mac-adhoc:
+    name: Mac adhoc build
+    needs: [validate, linux-green]
+    if: needs.validate.outputs.mode == 'adhoc'
+    runs-on: macos-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Encrypts a failed build's log for build-dmg-mac's upload step. Optional:
+      # without it the action says so and uploads nothing. Runs before any
+      # secret is staged, so Homebrew never sees one.
+      - name: Install age
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+          HOMEBREW_NO_ENV_HINTS: "1"
+        run: brew install --quiet age >/dev/null
+
+      - uses: ./.github/actions/checkout-product
+        with:
+          ref: ${{ needs.validate.outputs.ref }}
+          token: ${{ secrets.DMG_SOURCE_TOKEN }}
+
+      - uses: ./.github/actions/build-dmg-mac
+        with:
+          ref: ${{ needs.validate.outputs.ref }}
+          version: ${{ needs.validate.outputs.version }}
+          mode: adhoc
+
+  build-mac-signed:
+    name: Mac signed build
+    needs: [validate, linux-green]
+    if: needs.validate.outputs.mode == 'developer-id'
+    runs-on: macos-latest
+    timeout-minutes: 120
+    environment: macos-dmg-signing
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Encrypts a failed build's log for build-dmg-mac's upload step. Optional:
+      # without it the action says so and uploads nothing. Runs before any
+      # secret is staged, so Homebrew never sees one.
+      - name: Install age
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+          HOMEBREW_NO_ENV_HINTS: "1"
+        run: brew install --quiet age >/dev/null
+
+      - name: Materialize signing files
+        env:
+          DEVELOPER_ID_P12: ${{ secrets.DEVELOPER_ID_P12 }}
+          DEVELOPER_ID_P12_PASSPHRASE: ${{ secrets.DEVELOPER_ID_P12_PASSPHRASE }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: .github/scripts/build-dmg/materialize_signing.sh
+
+      - name: Stage the diagnostics client key
+        env:
+          BLOWHORN_DIAGNOSTICS_KEY: ${{ secrets.BLOWHORN_DIAGNOSTICS_KEY }}
+        run: .github/scripts/build-dmg/stage_diagnostics_key.sh
+
+      - uses: ./.github/actions/checkout-product
+        with:
+          ref: ${{ needs.validate.outputs.ref }}
+          token: ${{ secrets.DMG_SOURCE_TOKEN }}
+
+      - uses: ./.github/actions/build-dmg-mac
+        with:
+          ref: ${{ needs.validate.outputs.ref }}
+          version: ${{ needs.validate.outputs.version }}
+          mode: developer-id

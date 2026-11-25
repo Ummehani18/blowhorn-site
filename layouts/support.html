@@ -19,7 +19,7 @@
         <section class="section support-contact" aria-labelledby="contact-title">
           <div class="section-head">
             <h2 id="contact-title" class="h2">Send us a message</h2>
-            <p class="muted">Tell us what you tried and what happened. We reply by email, usually within a day.</p>
+            <p class="muted">Report a problem, ask a product question or just say hello. Leave an email only if you want a response.</p>
           </div>
           <div class="support-contact-grid">
             <div class="card card-paper support-form-card">
@@ -29,9 +29,18 @@
               <p class="label">Prefer email?</p>
               <p class="support-mail"><a href="mailto:{{ $support.email }}?subject=Blowhorn%20support">{{ $support.email }}</a></p>
               <p class="muted">A security problem goes to <a href="mailto:security@blowhorn.ai">security@blowhorn.ai</a>, never the form or a public issue.</p>
-              <p class="caption muted">The form sends your name, email and message to our support queue. The <a href="{{ "legal/privacy/" | relURL }}">privacy page</a> says what is stored and where it goes.</p>
+              <p class="caption muted">The form sends your message and response preference to our support queue. Name and email are optional. The <a href="{{ "legal/privacy/" | relURL }}">privacy page</a> says what is stored and where it goes.</p>
             </div>
           </div>
+        </section>
+
+        <section class="section" aria-labelledby="diagnostics-title">
+          <div class="section-head">
+            <h2 id="diagnostics-title" class="h2">Let your AI help with the details</h2>
+            <p class="muted">For a problem report, copy this prompt into the AI you use with Blowhorn. Review the summary before adding it to your message above.</p>
+          </div>
+          <div class="support-prompt">{{ partial "code-card.html" (dict "code" site.Data.support_diagnostics.prompt "title" "Support prompt" "lang" "markdown") }}</div>
+          <p class="caption muted">Blowhorn can preview small, redacted failure reports. This form does not yet accept diagnostic archives or upload files. A local report ID is not proof that a report reached the team.</p>
         </section>
 
         <section class="section" aria-labelledby="self-serve-title">
@@ -57,4 +66,9 @@
         </section>
       </div>
     </main>
+{{ end }}
+
+{{ define "scripts" }}
+  {{- $supportForm := resources.Get "js/support-form.js" | minify | fingerprint }}
+  <script src="{{ $supportForm.RelPermalink }}" defer></script>
 {{ end }}

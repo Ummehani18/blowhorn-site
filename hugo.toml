@@ -185,6 +185,7 @@ renderSegments = ["public"]
   image_alt = "The Blowhorn logo: the Crowhorn icon beside the Blowhorn wordmark"
   # Home page OG title, kept as the lead slogan (was already the home-head title).
   home_title = "Blowhorn: not a bot, it's you"
+  twitter_site = "@blowhorn_ai"
 
 # The API reference (layout rest-apis, docs/api-reference.md). `spec` is the
 # path, inside this project, of the public OpenAPI JSON that

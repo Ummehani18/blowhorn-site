@@ -1,0 +1,12 @@
+# Product paths a public runner must never materialize. Keep in step with
+# desktop/scripts/build-dmg.mjs PUBLIC_RUNNER_EXCLUDES and
+# release/internal-paths.txt in blowhorn-ai/blowhorn. release/signing/ is first
+# and is never checked out, even briefly.
+release/signing/
+data/profiles/
+marketing/gtm/
+marketing/walkthrough/
+marketing/strategy/
+marketing/capability-comparison/
+data/analytics/
+internal/
